@@ -3,27 +3,26 @@ import yfinance as yf
 import pandas as pd
 import concurrent.futures
 
-st.set_page_config(page_title="Pro Breakout Scanner", layout="wide")
+st.set_page_config(page_title="Near Breakout Scanner", layout="wide")
 
-st.title("📈 Nifty 500 Real-Time Breakout Scanner")
-st.markdown("Scanning **Nifty 500** for stocks hitting 20-day highs with strong volume surge.")
+st.title("🎯 Nifty 500: Near-Breakout & Target Scanner")
+st.markdown("""
+This scanner identifies stocks trading **within 2% of their 20-day high** with high volume support. 
+It calculates potential targets based on the breakout level.
+""")
 
 # --- 1. Fetch Nifty 500 Tickers ---
-@st.cache_data(ttl=86400) # Cache list for 24 hours
+@st.cache_data(ttl=86400)
 def get_nifty_500_tickers():
     url = "https://archives.nseindia.com/content/indices/ind_nifty500list.csv"
     try:
-        # Use a timeout and headers to mimic a browser
         df = pd.read_csv(url)
         return [f"{symbol}.NS" for symbol in df['Symbol'].tolist()]
-    except Exception as e:
-        st.error(f"Could not fetch Nifty 500 list from NSE. Using Nifty 50 fallback.")
-        return [
-            'RELIANCE.NS', 'TCS.NS', 'HDFCBANK.NS', 'ICICIBANK.NS', 'INFY.NS', 
-            'BHARTIARTL.NS', 'SBIN.NS', 'ITC.NS', 'LICI.NS', 'LT.NS'
-        ]
+    except Exception:
+        # Fallback to a smaller list if NSE is unreachable
+        return ['RELIANCE.NS', 'TCS.NS', 'HDFCBANK.NS', 'ICICIBANK.NS', 'INFY.NS']
 
-def check_breakout(ticker):
+def check_near_breakout(ticker):
     try:
         # Fetching 50 days of data
         df = yf.download(ticker, period="50d", interval="1d", progress=False)
@@ -31,29 +30,39 @@ def check_breakout(ticker):
         if df.empty or len(df) < 22: 
             return None
         
-        # Flatten MultiIndex columns if present
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
 
-        # 20-Day High (excluding current candle)
-        recent_high = float(df['High'].iloc[-21:-1].max())
+        # 1. Breakout Price (Resistance) = Max of previous 20 days
+        breakout_price = float(df['High'].iloc[-21:-1].max())
+        
+        # 2. Current Market Price (CMP)
+        cmp = float(df['Close'].iloc[-1])
+        
+        # 3. Volume Logic
         avg_vol = float(df['Volume'].iloc[-21:-1].mean())
-        
-        current_close = float(df['Close'].iloc[-1])
         current_vol = float(df['Volume'].iloc[-1])
-        prev_close = float(df['Close'].iloc[-2])
-        
         vol_ratio = current_vol / avg_vol if avg_vol > 0 else 0
-        gain_pct = ((current_close - prev_close) / prev_close) * 100
         
-        # Breakout Condition: New High + Volume > 1.5x
-        if (current_close > recent_high) and (vol_ratio > 1.5):
+        # 4. Proximity Logic (Is CMP within 2% of Breakout Price?)
+        # And CMP must still be BELOW or exactly at the breakout price
+        distance_to_breakout = ((breakout_price - cmp) / breakout_price) * 100
+        
+        # We define "Near Breakout" as between 0% and 2% distance
+        if 0 <= distance_to_breakout <= 2.0:
+            
+            # 5. Calculate Target (Example: Breakout Price + 5% for T1, 10% for T2)
+            target_1 = breakout_price * 1.05
+            target_2 = breakout_price * 1.10
+            
             return {
                 "Ticker": ticker.replace(".NS", ""),
-                "Price": round(current_close, 2),
-                "20D High": round(recent_high, 2),
+                "CMP": round(cmp, 2),
+                "Breakout Price": round(breakout_price, 2),
+                "Distance (%)": round(distance_to_breakout, 2),
                 "Vol Ratio": round(vol_ratio, 2),
-                "Day Gain %": round(gain_pct, 2)
+                "Target 1 (5%)": round(target_1, 2),
+                "Target 2 (10%)": round(target_2, 2)
             }
     except:
         return None
@@ -62,47 +71,52 @@ def check_breakout(ticker):
 # --- 2. Execution Logic ---
 tickers = get_nifty_500_tickers()
 
-if st.button(f'🔍 Scan {len(tickers)} Stocks Now'):
-    breakouts = []
+if st.button(f'🔭 Scan {len(tickers)} Stocks for Setup'):
+    results = []
     
-    with st.status("Fetching live market data...", expanded=True) as status:
-        # ThreadPoolExecutor makes scanning 500 stocks ~10x faster
-        with concurrent.futures.ThreadPoolExecutor(max_workers=15) as executor:
-            future_to_ticker = {executor.submit(check_breakout, t): t for t in tickers}
+    with st.status("Scanning for setups...", expanded=True) as status:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
+            future_to_ticker = {executor.submit(check_near_breakout, t): t for t in tickers}
             
             progress_bar = st.progress(0)
             for i, future in enumerate(concurrent.futures.as_completed(future_to_ticker)):
                 res = future.result()
                 if res:
-                    breakouts.append(res)
+                    results.append(res)
                 progress_bar.progress((i + 1) / len(tickers))
         
         status.update(label="Scan Complete!", state="complete", expanded=False)
 
     # --- 3. Display Results ---
-    if breakouts:
-        df_final = pd.DataFrame(breakouts)
+    if results:
+        df_final = pd.DataFrame(results)
         
-        # Sort by Vol Ratio (Priority)
-        df_final = df_final.sort_values(by="Vol Ratio", ascending=False)
+        # Priority: Show stocks closest to breakout (lowest distance) with highest volume
+        df_final = df_final.sort_values(by=["Distance (%)", "Vol Ratio"], ascending=[True, False])
         
-        st.success(f"🔥 Found {len(df_final)} Potential Breakouts!")
+        st.success(f"📈 Found {len(df_final)} stocks near a breakout level!")
         
-        # Using standard dataframe to avoid Matplotlib dependency errors
+        # Display with formatting
         st.dataframe(
             df_final, 
             use_container_width=True,
             column_config={
-                "Vol Ratio": st.column_config.NumberColumn("Vol Ratio 🚀"),
-                "Day Gain %": st.column_config.NumberColumn("Day Gain %", format="%.2f%%")
+                "CMP": st.column_config.NumberColumn("Current Price", format="₹%.2f"),
+                "Breakout Price": st.column_config.NumberColumn("Breakout Level", format="₹%.2f"),
+                "Distance (%)": st.column_config.NumberColumn("Distance to BO", format="%.2f%%"),
+                "Target 1 (5%)": st.column_config.NumberColumn("Target 1", format="₹%.2f"),
+                "Target 2 (10%)": st.column_config.NumberColumn("Target 2", format="₹%.2f"),
             }
         )
     else:
-        st.warning("No breakout candidates found in the Nifty 500 currently.")
+        st.warning("No stocks found within 2% of their 20-day high right now.")
 
-st.sidebar.info("""
-**Scan Logic:**
-- **Price:** Current Close > High of last 20 days.
-- **Volume:** Current Volume > 1.5x of 20-day average.
-- **Priority:** Sorted by Volume Ratio (Highest surge at top).
+st.sidebar.markdown("""
+### Scanner Strategy:
+- **Near Breakout**: CMP is within **0% to 2%** of the 20-day High.
+- **Breakout Price**: The highest price hit in the last 20 trading sessions.
+- **Targets**:
+    - **T1**: 5% above Breakout Price.
+    - **T2**: 10% above Breakout Price.
+- **Tip**: High **Vol Ratio** (> 1.0) increases the chance of a successful breakout.
 """)
