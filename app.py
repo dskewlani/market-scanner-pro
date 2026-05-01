@@ -7,39 +7,45 @@ import yfinance as yf
 from datetime import datetime, time as dtime
 from concurrent.futures import ThreadPoolExecutor
 import requests
+import os
 from streamlit_autorefresh import st_autorefresh
 
 # ================================
-# PAGE CONFIG
+# CONFIG
 # ================================
-st.set_page_config(page_title="ORB Dashboard V11 (Stable)", layout="wide")
+st.set_page_config(page_title="ORB V16 Pro", layout="wide")
+st.title("💰 ORB V16 (Capital + Position Sizing)")
 
-st.title("📊 ORB Trading Dashboard (V11 Stable)")
-st.write("Live Scanner with Telegram Alerts (Free Data)")
+st_autorefresh(interval=60 * 1000, key="refresh")
 
-# ================================
-# AUTO REFRESH (SAFE)
-# ================================
-# Re-runs app every 60 seconds (safe for Streamlit)
-st_autorefresh(interval=60 * 1000, key="auto_refresh")
+LOG_FILE = "trade_log.csv"
 
 # ================================
-# TELEGRAM SETTINGS (SIDEBAR)
+# USER SETTINGS
 # ================================
-st.sidebar.header("📱 Telegram Settings")
-TELEGRAM_TOKEN = st.sidebar.text_input("Bot Token", type="password")
-TELEGRAM_CHAT_ID = st.sidebar.text_input("Chat ID")
+st.sidebar.header("⚙ Risk Settings")
 
-def send_telegram(msg: str):
-    if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
+initial_capital = st.sidebar.number_input("Capital (₹)", 10000, 10000000, 100000)
+risk_pct = st.sidebar.slider("Risk per Trade (%)", 0.5, 5.0, 1.0)
+trailing_pct = st.sidebar.slider("Trailing SL (%)", 0.2, 5.0, 0.5)
+
+# ================================
+# TELEGRAM
+# ================================
+st.sidebar.header("📱 Telegram")
+TOKEN = st.sidebar.text_input("Bot Token")
+CHAT_ID = st.sidebar.text_input("Chat ID")
+
+def send_telegram(msg):
+    if TOKEN and CHAT_ID:
         try:
-            url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-            requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": msg}, timeout=5)
-        except Exception:
+            url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+            requests.post(url, data={"chat_id": CHAT_ID, "text": msg})
+        except:
             pass
 
 # ================================
-# USER INPUTS
+# INPUTS
 # ================================
 col1, col2, col3 = st.columns(3)
 
@@ -47,163 +53,208 @@ with col1:
     category = st.selectbox("Market", ["Nifty 50", "Midcap", "Smallcap"])
 
 with col2:
-    orb_minutes = st.number_input("ORB Minutes", min_value=1, max_value=60, value=15)
+    orb_minutes = st.number_input("ORB Minutes", 1, 60, 15)
 
 with col3:
-    vol_mult = st.slider("Volume Multiplier", min_value=1.0, max_value=5.0, value=1.5)
+    ema_period = st.number_input("EMA", 5, 100, 20)
 
 # ================================
-# LOAD SYMBOLS
+# SYMBOLS
 # ================================
 @st.cache_data(ttl=86400)
-def get_symbols(cat: str):
-    try:
-        if cat == "Nifty 50":
-            url = "https://archives.nseindia.com/content/indices/ind_nifty50list.csv"
-        elif cat == "Midcap":
-            url = "https://archives.nseindia.com/content/indices/ind_niftymidcap100list.csv"
-        else:
-            url = "https://archives.nseindia.com/content/indices/ind_niftysmallcap100list.csv"
+def get_symbols(cat):
+    if cat == "Nifty 50":
+        url = "https://archives.nseindia.com/content/indices/ind_nifty50list.csv"
+    elif cat == "Midcap":
+        url = "https://archives.nseindia.com/content/indices/ind_niftymidcap100list.csv"
+    else:
+        url = "https://archives.nseindia.com/content/indices/ind_niftysmallcap100list.csv"
 
-        df = pd.read_csv(url)
-        syms = df["Symbol"].dropna().astype(str).tolist()
-        return [s + ".NS" for s in syms]
-    except Exception:
-        return []
+    df = pd.read_csv(url)
+    return [s + ".NS" for s in df["Symbol"]]
 
 symbols = get_symbols(category)
-st.write(f"📊 Stocks Loaded: {len(symbols)}")
 
 # ================================
 # SESSION STATE
 # ================================
+if "capital" not in st.session_state:
+    st.session_state.capital = initial_capital
+
+if "active_trades" not in st.session_state:
+    st.session_state.active_trades = {}
+
+if "closed_trades" not in st.session_state:
+    st.session_state.closed_trades = []
+
 if "running" not in st.session_state:
     st.session_state.running = False
-
-if "alerts_sent" not in st.session_state:
-    st.session_state.alerts_sent = set()
-
-if "signals" not in st.session_state:
-    st.session_state.signals = []
 
 # ================================
 # START / STOP
 # ================================
 c1, c2 = st.columns(2)
 with c1:
-    if st.button("▶ Start Scanner"):
+    if st.button("▶ Start"):
         st.session_state.running = True
 with c2:
-    if st.button("⏹ Stop Scanner"):
+    if st.button("⏹ Stop"):
         st.session_state.running = False
 
 # ================================
-# DATA FETCH
+# FETCH
 # ================================
-def fetch(symbol: str):
+def fetch(symbol):
     try:
         df = yf.download(symbol, interval="1m", period="1d", progress=False)
-        if df is None or df.empty:
-            return symbol, None
-        df = df.dropna()
+        df.dropna(inplace=True)
         return symbol, df
-    except Exception:
+    except:
         return symbol, None
 
 # ================================
-# ORB PROCESS
+# INDICATORS
 # ================================
-def process(symbol_df):
-    symbol, df = symbol_df
+def add_indicators(df):
+    df["EMA"] = df["Close"].ewm(span=ema_period).mean()
+    df["TP"] = (df["High"] + df["Low"] + df["Close"]) / 3
+    df["VWAP"] = (df["TP"] * df["Volume"]).cumsum() / df["Volume"].cumsum()
+    return df
 
-    if df is None or len(df) < 30:
-        return None
-
-    # Ensure time column
-    df = df.copy()
+# ================================
+# STRATEGY
+# ================================
+def get_signal(df):
+    df = add_indicators(df)
     df["Time"] = df.index.time
 
-    market_open = dtime(9, 15)
-    cutoff_dt = datetime.combine(datetime.today(), market_open) + pd.Timedelta(minutes=orb_minutes)
-    cutoff = cutoff_dt.time()
+    cutoff = (datetime.combine(datetime.today(), dtime(9, 15)) +
+              pd.Timedelta(minutes=orb_minutes)).time()
 
     orb_df = df[df["Time"] <= cutoff]
+
     if orb_df.empty:
         return None
 
-    orb_high = float(orb_df["High"].max())
-    orb_low = float(orb_df["Low"].min())
+    high = orb_df["High"].max()
+    low = orb_df["Low"].min()
 
-    last = float(df["Close"].iloc[-1])
-    prev = float(df["Close"].iloc[-2])
+    last = df["Close"].iloc[-1]
+    ema = df["EMA"].iloc[-1]
+    vwap = df["VWAP"].iloc[-1]
 
-    # Breakout
-    signal = None
-    if last > orb_high:
-        signal = "BUY"
-    elif last < orb_low:
-        signal = "SELL"
+    if last > high and last > ema and last > vwap:
+        return "BUY", last, high, low
+    elif last < low and last < ema and last < vwap:
+        return "SELL", last, high, low
 
-    if signal is None:
-        return None
+    return None
 
-    # Fake breakout filter
-    if (prev > orb_high and last < orb_high) or (prev < orb_low and last > orb_low):
-        return None
+# ================================
+# POSITION SIZING
+# ================================
+def calculate_qty(entry, sl):
+    risk_amount = st.session_state.capital * (risk_pct / 100)
+    risk_per_share = abs(entry - sl)
 
-    # Volume filter
-    vol_ma = df["Volume"].rolling(20).mean().iloc[-1]
-    if pd.isna(vol_ma):
-        return None
-    if float(df["Volume"].iloc[-1]) < float(vol_ma) * float(vol_mult):
-        return None
+    if risk_per_share == 0:
+        return 0
 
-    return {
-        "Symbol": symbol,
-        "Price": round(last, 2),
-        "ORB High": round(orb_high, 2),
-        "ORB Low": round(orb_low, 2),
-        "Signal": signal,
-        "Time": datetime.now().strftime("%H:%M:%S"),
+    qty = int(risk_amount / risk_per_share)
+    return max(qty, 1)
+
+# ================================
+# TRADE FUNCTIONS
+# ================================
+def enter_trade(symbol, signal, price, high, low):
+
+    sl = low if signal == "BUY" else high
+    qty = calculate_qty(price, sl)
+
+    st.session_state.active_trades[symbol] = {
+        "type": signal,
+        "entry": price,
+        "sl": sl,
+        "qty": qty
     }
 
-# ================================
-# MAIN SCAN
-# ================================
-st.subheader("📡 Live Signals")
+    send_telegram(f"🚨 {signal} {symbol} @ {price} | Qty: {qty}")
 
-if st.session_state.running and symbols:
-    results = []
-    progress = st.progress(0)
+def manage_trade(symbol, df):
 
-    # Fetch in parallel
+    trade = st.session_state.active_trades[symbol]
+    price = df["Close"].iloc[-1]
+
+    if trade["type"] == "BUY":
+        trade["sl"] = max(trade["sl"], price * (1 - trailing_pct / 100))
+        if price <= trade["sl"]:
+            pnl = (price - trade["entry"]) * trade["qty"]
+            exit_trade(symbol, price, pnl)
+
+    else:
+        trade["sl"] = min(trade["sl"], price * (1 + trailing_pct / 100))
+        if price >= trade["sl"]:
+            pnl = (trade["entry"] - price) * trade["qty"]
+            exit_trade(symbol, price, pnl)
+
+def exit_trade(symbol, price, pnl):
+
+    trade = st.session_state.active_trades.pop(symbol)
+    st.session_state.capital += pnl
+
+    record = {
+        "Symbol": symbol,
+        "Type": trade["type"],
+        "Entry": trade["entry"],
+        "Exit": price,
+        "Qty": trade["qty"],
+        "PnL": round(pnl, 2),
+        "Capital": round(st.session_state.capital, 2)
+    }
+
+    st.session_state.closed_trades.append(record)
+
+    send_telegram(f"❌ EXIT {symbol} | PnL: {round(pnl,2)} | Capital: {round(st.session_state.capital,2)}")
+
+# ================================
+# SCANNER
+# ================================
+if st.session_state.running:
+
     with ThreadPoolExecutor(max_workers=10) as executor:
         data = list(executor.map(fetch, symbols))
 
-    for i, item in enumerate(data):
-        res = process(item)
-        if res:
-            results.append(res)
+    for symbol, df in data:
 
-            key = f"{res['Symbol']}_{res['Signal']}"
-            if key not in st.session_state.alerts_sent:
-                send_telegram(f"🚨 {res['Signal']} {res['Symbol']} @ {res['Price']}")
-                st.session_state.alerts_sent.add(key)
+        if df is None or len(df) < 30:
+            continue
 
-        progress.progress((i + 1) / max(len(data), 1))
+        if symbol not in st.session_state.active_trades:
+            signal = get_signal(df)
+            if signal:
+                enter_trade(symbol, *signal)
 
-    st.session_state.signals = results
+        else:
+            manage_trade(symbol, df)
 
 # ================================
-# DISPLAY
+# DASHBOARD
 # ================================
-if st.session_state.signals:
-    st.success(f"{len(st.session_state.signals)} Signals Found")
-    st.dataframe(pd.DataFrame(st.session_state.signals), use_container_width=True)
+st.subheader("💰 Capital")
+st.metric("Current Capital", round(st.session_state.capital, 2))
+
+st.subheader("📈 Active Trades")
+st.write(st.session_state.active_trades)
+
+st.subheader("📜 Trade History")
+
+if st.session_state.closed_trades:
+    df = pd.DataFrame(st.session_state.closed_trades)
+    st.dataframe(df)
+
+    st.metric("Total PnL", round(df["PnL"].sum(), 2))
+    st.metric("Win Rate (%)", round((df["PnL"] > 0).mean() * 100, 2))
 else:
-    st.info("No signals found")
+    st.write("No trades yet")
 
-# ================================
-# TIMESTAMP
-# ================================
-st.write("🕒 Last Updated:", datetime.now().strftime("%H:%M:%S"))
+st.write("🕒 Last Update:", datetime.now().strftime("%H:%M:%S"))
