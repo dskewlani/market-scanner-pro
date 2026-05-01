@@ -5,171 +5,168 @@ import streamlit as st
 import pandas as pd
 import yfinance as yf
 from datetime import datetime, time
-from streamlit_autorefresh import st_autorefresh
+from concurrent.futures import ThreadPoolExecutor
+import base64
 
 # ================================
-# CONFIG
+# PAGE CONFIG
 # ================================
-st.set_page_config(page_title="ORB Scanner V6", layout="wide")
+st.set_page_config(page_title="ORB Scanner V8 Lite", layout="wide")
+
+st.title("⚡ ORB Scanner V8 Lite (FREE)")
+st.write("Fast ORB Scanner with Alerts + Smart Filters")
 
 # ================================
-# AUTO REFRESH (LIVE SCANNER)
+# AUTO REFRESH (30 sec)
 # ================================
-st_autorefresh(interval=60 * 1000, key="live_scan")  # 60 sec refresh
+st_autorefresh = st.experimental_rerun
 
-# ================================
-# UI HEADER
-# ================================
-st.title("🔥 ORB Scanner V6 (Institutional Level)")
-st.write("Live Market Scanner with True ORB + Fake Breakout Filter")
+if st.button("🔄 Auto Refresh"):
+    st_autorefresh()
 
 # ================================
 # USER INPUTS
 # ================================
-symbols_input = st.text_input(
-    "Enter Symbols (comma separated)",
-    value="RELIANCE.NS,TCS.NS,INFY.NS,HDFCBANK.NS"
+category = st.selectbox(
+    "Select Market Category",
+    ["Large Cap (Nifty 50)", "Mid Cap", "Small Cap"]
 )
 
-orb_minutes = st.number_input("ORB Minutes", min_value=1, max_value=60, value=15)
+orb_minutes = st.number_input("ORB Minutes", 1, 60, 15)
 volume_multiplier = st.slider("Volume Spike Multiplier", 1.0, 5.0, 1.5)
 
-symbols = [s.strip() for s in symbols_input.split(",")]
+# ================================
+# STOCK UNIVERSE
+# ================================
+@st.cache_data(ttl=86400)
+def get_symbols(category):
+    try:
+        if "Large" in category:
+            url = "https://archives.nseindia.com/content/indices/ind_nifty50list.csv"
+        elif "Mid" in category:
+            url = "https://archives.nseindia.com/content/indices/ind_niftymidcap100list.csv"
+        else:
+            url = "https://archives.nseindia.com/content/indices/ind_niftysmallcap100list.csv"
+
+        df = pd.read_csv(url)
+        return [s + ".NS" for s in df["Symbol"].tolist()]
+    except:
+        return []
+
+symbols = get_symbols(category)
+st.write(f"📊 Stocks Loaded: {len(symbols)}")
 
 # ================================
-# DATA FETCH (CACHED)
+# FETCH DATA (FAST)
 # ================================
-@st.cache_data(ttl=60)
-def fetch_data(symbol):
-    df = yf.download(
-        symbol,
-        interval="1m",
-        period="1d",
-        progress=False
-    )
-    df.dropna(inplace=True)
-    return df
+def fetch(symbol):
+    try:
+        df = yf.download(symbol, interval="1m", period="1d", progress=False)
+        df.dropna(inplace=True)
+        return symbol, df
+    except:
+        return symbol, None
 
 # ================================
-# TRUE ORB CALCULATION
+# ORB LOGIC
 # ================================
-def calculate_orb(df, orb_minutes):
-    market_open = time(9, 15)
+def process_stock(symbol_df):
+    symbol, df = symbol_df
+
+    if df is None or len(df) < 30:
+        return None
 
     df["Time"] = df.index.time
 
-    orb_df = df[df["Time"] <= (datetime.combine(datetime.today(), market_open) 
-                              + pd.Timedelta(minutes=orb_minutes)).time()]
+    market_open = time(9, 15)
+    cutoff = (datetime.combine(datetime.today(), market_open) +
+              pd.Timedelta(minutes=orb_minutes)).time()
+
+    orb_df = df[df["Time"] <= cutoff]
+
+    if orb_df.empty:
+        return None
 
     orb_high = orb_df["High"].max()
     orb_low = orb_df["Low"].min()
 
-    return orb_high, orb_low
+    last_price = df["Close"].iloc[-1]
+    prev_price = df["Close"].iloc[-2]
 
-# ================================
-# FAKE BREAKOUT FILTER
-# ================================
-def is_fake_breakout(df, orb_high, orb_low):
-    last_close = df["Close"].iloc[-1]
-    prev_close = df["Close"].iloc[-2]
+    # breakout
+    signal = None
+    if last_price > orb_high:
+        signal = "BUY"
+    elif last_price < orb_low:
+        signal = "SELL"
 
-    # Fake breakout condition
-    if prev_close > orb_high and last_close < orb_high:
-        return True
+    if not signal:
+        return None
 
-    if prev_close < orb_low and last_close > orb_low:
-        return True
+    # fake breakout
+    if (prev_price > orb_high and last_price < orb_high) or \
+       (prev_price < orb_low and last_price > orb_low):
+        return None
 
-    return False
-
-# ================================
-# VOLUME CONFIRMATION
-# ================================
-def volume_spike(df, multiplier):
+    # volume
     avg_vol = df["Volume"].rolling(20).mean().iloc[-1]
-    current_vol = df["Volume"].iloc[-1]
+    if df["Volume"].iloc[-1] < avg_vol * volume_multiplier:
+        return None
 
-    return current_vol > avg_vol * multiplier
+    return {
+        "Symbol": symbol,
+        "Price": round(last_price, 2),
+        "ORB High": round(orb_high, 2),
+        "ORB Low": round(orb_low, 2),
+        "Signal": signal
+    }
 
 # ================================
-# SCANNER LOGIC
+# SOUND ALERT
 # ================================
-def scan_market():
+def play_sound():
+    sound_file = open("https://www.soundjay.com/buttons/sounds/button-3.mp3", "rb").read()
+    b64 = base64.b64encode(sound_file).decode()
+    md = f"""
+    <audio autoplay>
+    <source src="data:audio/mp3;base64,{b64}" type="audio/mp3">
+    </audio>
+    """
+    st.markdown(md, unsafe_allow_html=True)
+
+# ================================
+# SCAN BUTTON
+# ================================
+if st.button("🚀 Run Scanner"):
+    st.write("🔍 Scanning...")
+
     results = []
 
-    for symbol in symbols:
-        try:
-            df = fetch_data(symbol)
+    progress = st.progress(0)
 
-            if len(df) < 30:
-                continue
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        data = list(executor.map(fetch, symbols))
 
-            orb_high, orb_low = calculate_orb(df, orb_minutes)
+    for i, item in enumerate(data):
+        res = process_stock(item)
+        if res:
+            results.append(res)
 
-            last_price = df["Close"].iloc[-1]
+        progress.progress((i + 1) / len(data))
 
-            breakout_type = None
+    # ================================
+    # OUTPUT
+    # ================================
+    if results:
+        df = pd.DataFrame(results)
+        st.success(f"🔥 {len(results)} Signals Found")
+        st.dataframe(df, use_container_width=True)
 
-            if last_price > orb_high:
-                breakout_type = "BUY"
-
-            elif last_price < orb_low:
-                breakout_type = "SELL"
-
-            if breakout_type:
-
-                # Apply Fake Breakout Filter
-                if is_fake_breakout(df, orb_high, orb_low):
-                    continue
-
-                # Apply Volume Filter
-                if not volume_spike(df, volume_multiplier):
-                    continue
-
-                results.append({
-                    "Symbol": symbol,
-                    "Price": round(last_price, 2),
-                    "ORB High": round(orb_high, 2),
-                    "ORB Low": round(orb_low, 2),
-                    "Signal": breakout_type
-                })
-
-        except Exception as e:
-            continue
-
-    return results
+        play_sound()  # 🔔 alert
+    else:
+        st.info("No signals found")
 
 # ================================
-# SESSION STATE
+# FOOTER
 # ================================
-if "signals" not in st.session_state:
-    st.session_state.signals = []
-
-# ================================
-# RUN SCANNER
-# ================================
-signals = scan_market()
-st.session_state.signals = signals
-
-# ================================
-# DISPLAY OUTPUT
-# ================================
-st.subheader("📊 Live Signals")
-
-if signals:
-    df = pd.DataFrame(signals)
-    st.dataframe(df, use_container_width=True)
-else:
-    st.write("No valid breakout signals")
-
-# ================================
-# TIMESTAMP
-# ================================
-st.write("🕒 Last Scan:", datetime.now().strftime("%H:%M:%S"))
-
-# ================================
-# MANUAL REFRESH BUTTON
-# ================================
-if st.button("🔄 Scan Now"):
-    st.session_state.signals = scan_market()
-    st.success("Scan Updated")
+st.write("🕒 Time:", datetime.now().strftime("%H:%M:%S"))
