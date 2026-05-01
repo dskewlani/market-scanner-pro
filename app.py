@@ -4,53 +4,44 @@
 import streamlit as st
 import pandas as pd
 import yfinance as yf
-from datetime import datetime, time as dtime
+from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
-import requests
+import plotly.graph_objects as go
+from streamlit_autorefresh import st_autorefresh
 
 # ================================
 # CONFIG
 # ================================
-st.set_page_config(page_title="ORB V17 Scoring System", layout="wide")
-st.title("🎯 ORB V17 (Signal Scoring System)")
+st.set_page_config(page_title="ORB V19 PRO", layout="wide")
+st.title("🚀 ORB V19 PRO (Top Trades + Equity Curve)")
+
+st_autorefresh(interval=60 * 1000, key="refresh")
+
+INITIAL_CAPITAL = 100000
 
 # ================================
-# SETTINGS
+# SESSION STATE
 # ================================
-col1, col2, col3 = st.columns(3)
+if "capital" not in st.session_state:
+    st.session_state.capital = INITIAL_CAPITAL
 
-with col1:
-    category = st.selectbox("Market", ["Nifty 50", "Midcap", "Smallcap"])
+if "equity_curve" not in st.session_state:
+    st.session_state.equity_curve = []
 
-with col2:
-    ema_period = st.number_input("EMA", 5, 100, 20)
-
-with col3:
-    min_score = st.slider("Minimum Score to Trade", 50, 100, 70)
+if "trade_log" not in st.session_state:
+    st.session_state.trade_log = []
 
 # ================================
 # SYMBOLS
 # ================================
-@st.cache_data(ttl=86400)
-def get_symbols(cat):
-    if cat == "Nifty 50":
-        url = "https://archives.nseindia.com/content/indices/ind_nifty50list.csv"
-    elif cat == "Midcap":
-        url = "https://archives.nseindia.com/content/indices/ind_niftymidcap100list.csv"
-    else:
-        url = "https://archives.nseindia.com/content/indices/ind_niftysmallcap100list.csv"
-
-    df = pd.read_csv(url)
-    return [s + ".NS" for s in df["Symbol"]]
-
-symbols = get_symbols(category)
+symbols = ["RELIANCE.NS", "TCS.NS", "INFY.NS", "HDFCBANK.NS"]
 
 # ================================
 # FETCH
 # ================================
 def fetch(symbol):
     try:
-        df = yf.download(symbol, interval="1m", period="1d", progress=False)
+        df = yf.download(symbol, interval="5m", period="1d", progress=False)
         df.dropna(inplace=True)
         return symbol, df
     except:
@@ -60,42 +51,23 @@ def fetch(symbol):
 # INDICATORS
 # ================================
 def add_indicators(df):
-    df["EMA"] = df["Close"].ewm(span=ema_period).mean()
-    df["TP"] = (df["High"] + df["Low"] + df["Close"]) / 3
-    df["VWAP"] = (df["TP"] * df["Volume"]).cumsum() / df["Volume"].cumsum()
+    df["EMA"] = df["Close"].ewm(span=20).mean()
     return df
 
 # ================================
-# SCORING SYSTEM
+# SCORING
 # ================================
-def calculate_score(df, high, low):
+def calculate_score(df):
     last = df["Close"].iloc[-1]
-    prev = df["Close"].iloc[-2]
     ema = df["EMA"].iloc[-1]
-    vwap = df["VWAP"].iloc[-1]
 
     score = 0
 
-    # 1. Breakout strength
-    if last > high * 1.002 or last < low * 0.998:
-        score += 20
+    if last > ema:
+        score += 50
 
-    # 2. EMA alignment
-    if (last > ema) or (last < ema):
-        score += 20
-
-    # 3. VWAP alignment
-    if (last > vwap) or (last < vwap):
-        score += 20
-
-    # 4. Volume spike
-    avg_vol = df["Volume"].rolling(20).mean().iloc[-1]
-    if df["Volume"].iloc[-1] > avg_vol * 1.5:
-        score += 20
-
-    # 5. Momentum
-    if abs(last - prev) / prev > 0.002:
-        score += 20
+    if abs(df["Close"].iloc[-1] - df["Close"].iloc[-2]) > 0.2:
+        score += 50
 
     return score
 
@@ -105,22 +77,13 @@ def calculate_score(df, high, low):
 def process(symbol_df):
     symbol, df = symbol_df
 
-    if df is None or len(df) < 30:
+    if df is None or len(df) < 20:
         return None
 
     df = add_indicators(df)
-    df["Time"] = df.index.time
 
-    cutoff = (datetime.combine(datetime.today(), dtime(9, 15)) +
-              pd.Timedelta(minutes=15)).time()
-
-    orb_df = df[df["Time"] <= cutoff]
-
-    if orb_df.empty:
-        return None
-
-    high = orb_df["High"].max()
-    low = orb_df["Low"].min()
+    high = df["High"].iloc[:3].max()
+    low = df["Low"].iloc[:3].min()
 
     last = df["Close"].iloc[-1]
 
@@ -133,29 +96,31 @@ def process(symbol_df):
     if not signal:
         return None
 
-    score = calculate_score(df, high, low)
+    score = calculate_score(df)
 
-    if score < min_score:
+    sl = low if signal == "BUY" else high
+    risk_per_share = abs(last - sl)
+
+    if risk_per_share == 0:
         return None
 
-    strength = "🔥 Strong" if score >= 80 else "⚠ Medium"
+    qty = int((st.session_state.capital * 0.01) / risk_per_share)
 
     return {
         "Symbol": symbol,
         "Signal": signal,
-        "Price": round(last, 2),
+        "Price": last,
         "Score": score,
-        "Strength": strength
+        "SL": sl,
+        "Qty": qty
     }
 
 # ================================
 # RUN SCANNER
 # ================================
-st.subheader("📡 Scored Signals")
-
 results = []
 
-with ThreadPoolExecutor(max_workers=10) as executor:
+with ThreadPoolExecutor(max_workers=5) as executor:
     data = list(executor.map(fetch, symbols))
 
 for item in data:
@@ -164,10 +129,63 @@ for item in data:
         results.append(res)
 
 # ================================
+# TOP 2 SELECTION
+# ================================
+df = pd.DataFrame(results)
+
+if not df.empty:
+    df = df.sort_values(by="Score", ascending=False).head(2)
+
+# ================================
 # DISPLAY
 # ================================
-if results:
-    df = pd.DataFrame(results).sort_values(by="Score", ascending=False)
+st.subheader("🎯 Top 2 Trades")
+
+if not df.empty:
     st.dataframe(df, use_container_width=True)
+
+    # Simulated PnL update
+    pnl = 0
+    for _, row in df.iterrows():
+        pnl += (row["Price"] - row["SL"]) * row["Qty"] * 0.3  # simulated move
+
+    st.session_state.capital += pnl
+
 else:
-    st.write("No high-quality signals")
+    st.write("No trades found")
+
+# ================================
+# EQUITY CURVE
+# ================================
+st.session_state.equity_curve.append({
+    "time": datetime.now(),
+    "capital": st.session_state.capital
+})
+
+equity_df = pd.DataFrame(st.session_state.equity_curve)
+
+st.subheader("📈 Equity Curve")
+
+fig = go.Figure()
+fig.add_trace(go.Scatter(
+    x=equity_df["time"],
+    y=equity_df["capital"],
+    mode="lines",
+    name="Equity"
+))
+
+st.plotly_chart(fig, use_container_width=True)
+
+# ================================
+# METRICS
+# ================================
+st.subheader("📊 Performance")
+
+if not equity_df.empty:
+    max_capital = equity_df["capital"].cummax()
+    drawdown = (equity_df["capital"] - max_capital).min()
+
+    st.metric("Current Capital", round(st.session_state.capital,2))
+    st.metric("Max Drawdown", round(drawdown,2))
+
+st.write("🕒 Last Update:", datetime.now().strftime("%H:%M:%S"))
