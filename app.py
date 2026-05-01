@@ -22,6 +22,7 @@ INITIAL_CAPITAL = 100000
 # ================================
 def is_market_open():
     now = datetime.now().time()
+    # Market hours: 9:15 AM to 3:30 PM
     return dtime(9, 15) <= now <= dtime(15, 30)
 
 market_open = is_market_open()
@@ -73,7 +74,7 @@ if "equity" not in st.session_state:
 # ================================
 # SYMBOLS
 # ================================
-symbols = ["RELIANCE.NS", "TCS.NS", "INFY.NS", "HDFCBANK.NS"]
+symbols = ["RELIANCE.NS", "TCS.NS", "INFY.NS", "HDFCBANK.NS", "ICICIBANK.NS", "SBIN.NS"]
 
 # ================================
 # FETCH
@@ -176,7 +177,7 @@ def get_signal(df):
 def calculate_qty(entry, sl):
     risk_amount = st.session_state.capital * (risk_pct / 100)
     risk_per_share = abs(entry - sl)
-    return int(risk_amount / risk_per_share) if risk_per_share else 0
+    return int(risk_amount / risk_per_share) if risk_per_share > 0 else 0
 
 # ================================
 # TRADE LOGIC
@@ -184,13 +185,15 @@ def calculate_qty(entry, sl):
 def enter_trade(symbol, signal, price, high, low):
     sl = low if signal == "BUY" else high
     qty = calculate_qty(price, sl)
-
-    st.session_state.active_trades[symbol] = {
-        "type": signal,
-        "entry": price,
-        "sl": sl,
-        "qty": qty
-    }
+    
+    if qty > 0:
+        st.session_state.active_trades[symbol] = {
+            "type": signal,
+            "entry": price,
+            "sl": sl,
+            "qty": qty,
+            "time": datetime.now().strftime("%H:%M:%S")
+        }
 
 def manage_trade(symbol, df):
     trade = st.session_state.active_trades[symbol]
@@ -215,65 +218,104 @@ def exit_trade(symbol, price, pnl):
         "Symbol": symbol,
         "Entry": trade["entry"],
         "Exit": price,
-        "PnL": round(pnl,2)
+        "PnL": round(pnl, 2),
+        "Time": datetime.now().strftime("%H:%M:%S")
     })
 
 # ================================
-# RUN CONDITION
+# RUN SCANNER WITH PROGRESS
 # ================================
 run_scan = market_open or manual_scan
 
 if not market_open:
-    st.warning("⏸ Market Closed – Auto scan paused")
+    st.warning("⏸ Market Closed – Auto scan paused. Use manual button to force check.")
 
-# ================================
-# RUN SCANNER
-# ================================
 if run_scan:
+    st.subheader("🔍 Live Scanner Status")
+    
+    # Progress placeholders
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    
+    qualified_count = 0
+    scanned_names = []
 
+    # Parallel Fetch
     with ThreadPoolExecutor(max_workers=5) as executor:
         data = list(executor.map(fetch, symbols))
 
-    for symbol, df in data:
+    # Processing and Signal Check
+    for i, (symbol, df) in enumerate(data):
+        # Update progress bar
+        pct = int(((i + 1) / len(symbols)) * 100)
+        progress_bar.progress(pct)
+        status_text.text(f"Scanning: {symbol}")
+        scanned_names.append(symbol)
 
         if df is None or len(df) < 30:
             continue
 
-        if symbol not in st.session_state.active_trades:
+        # Check if already in trade
+        if symbol in st.session_state.active_trades:
+            manage_trade(symbol, df)
+            qualified_count += 1
+        else:
             signal = get_signal(df)
             if signal:
                 enter_trade(symbol, *signal)
-        else:
-            manage_trade(symbol, df)
+                qualified_count += 1
+
+    # Cleanup progress UI
+    status_text.success(f"✅ Scan Complete at {datetime.now().strftime('%H:%M:%S')}")
+    
+    # Display scanning metrics
+    m1, m2 = st.columns(2)
+    m1.info(f"**Shares Scanned:** {', '.join(scanned_names)}")
+    m2.metric("Qualified / Active Trades", qualified_count)
 
 # ================================
-# EQUITY
+# EQUITY TRACKING
 # ================================
 st.session_state.equity.append({
     "time": datetime.now(),
     "capital": st.session_state.capital
 })
-
 equity_df = pd.DataFrame(st.session_state.equity)
 
 # ================================
-# DISPLAY
+# DISPLAY UI
 # ================================
-st.subheader("📈 Active Trades")
-st.write(st.session_state.active_trades)
+st.divider()
 
-st.subheader("📜 Closed Trades")
-st.write(pd.DataFrame(st.session_state.closed_trades))
+col_left, col_right = st.columns([1, 1])
 
-st.subheader("📊 Equity Curve")
+with col_left:
+    st.subheader("📈 Active Positions")
+    if st.session_state.active_trades:
+        st.table(pd.DataFrame(st.session_state.active_trades).T)
+    else:
+        st.write("No active positions.")
+
+with col_right:
+    st.subheader("📜 Trade History")
+    if st.session_state.closed_trades:
+        st.dataframe(pd.DataFrame(st.session_state.closed_trades), use_container_width=True)
+    else:
+        st.write("No closed trades yet.")
+
+st.divider()
+st.subheader("📊 Performance & Equity Curve")
 
 fig = go.Figure()
 fig.add_trace(go.Scatter(
     x=equity_df["time"],
     y=equity_df["capital"],
-    mode="lines"
+    mode="lines+markers",
+    name="Capital",
+    line=dict(color="#00FF00")
 ))
+fig.update_layout(template="plotly_dark", xaxis_title="Time", yaxis_title="Equity")
 st.plotly_chart(fig, use_container_width=True)
 
-st.metric("Capital", round(st.session_state.capital,2))
-st.write("🕒", datetime.now().strftime("%H:%M:%S"))
+st.metric("Total Account Value", f"₹{round(st.session_state.capital, 2)}")
+st.write(f"Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
