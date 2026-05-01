@@ -1,22 +1,23 @@
-# ================================
-# IMPORTS
-# ================================
 import streamlit as st
 import pandas as pd
 import yfinance as yf
 from datetime import datetime, time as dtime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import plotly.graph_objects as go
 from streamlit_autorefresh import st_autorefresh
 
 # ================================
-# CONFIG
+# CONFIG & REFRESH
 # ================================
-st.set_page_config(page_title="ORB V22 Institutional", layout="wide")
-st.title("🚀 ORB V22 Mega Scanner (Institutional Flow)")
+st.set_page_config(page_title="ORB V22 Pro", layout="wide")
+st.title("🚀 ORB V22 Mega-Scanner (Pro Edition)")
+
+if "capital" not in st.session_state: st.session_state.capital = 100000
+
+# Auto-refresh every 2 minutes during market hours
+st_autorefresh(interval=120 * 1000, key="pro_refresh")
 
 # ================================
-# MEGA UNIVERSE LOADER
+# DATA FETCHING (2500+ STOCKS)
 # ================================
 @st.cache_data
 def get_mega_universe():
@@ -37,139 +38,109 @@ def get_mega_universe():
     return sorted(list(all_symbols))
 
 # ================================
-# MARKET HOURS & REFRESH
+# ANALYSIS ENGINE
 # ================================
-def is_market_open():
-    now = datetime.now().time()
-    return dtime(9, 15) <= now <= dtime(15, 30)
-
-market_open = is_market_open()
-st_autorefresh(interval=120 * 1000 if market_open else 600 * 1000, key="mega_refresh")
-
-# ================================
-# CORE SCANNER ENGINE
-# ================================
-def scan_stock(symbol, orb_mins):
+def scan_stock_pro(symbol, orb_mins):
     try:
-        # Fetch 2 days of data to calculate average volume comparison
-        df = yf.download(symbol, period="2d", interval="5m", progress=False, threads=False)
+        # Pull 3 days of data for Yesterday's High and Volume Average
+        df = yf.download(symbol, period="3d", interval="5m", progress=False, threads=False)
         if df is None or len(df) < 20: return None
         
-        # Split into Yesterday and Today
         today_date = df.index.date[-1]
         df_today = df[df.index.date == today_date].copy()
         df_prev = df[df.index.date < today_date].copy()
         
-        if df_today.empty: return None
+        if df_today.empty or df_prev.empty: return None
 
-        # Institutional Volume Metric (Today's Total Vol vs Prev Day Total Vol)
-        vol_ratio = df_today['Volume'].sum() / (df_prev['Volume'].sum() + 1)
+        # 1. Multi-Timeframe Filter (Prev Day High)
+        prev_day_high = df_prev['High'].max()
         
-        # ORB Calculation
+        # 2. Volume Shock (Today's Total vs Yesterday's Total)
+        vol_shock = df_today['Volume'].sum() / (df_prev[df_prev.index.date == df_prev.index.date[-1]]['Volume'].sum() + 1)
+        
+        # 3. EMA Distance (Overextension Check)
+        ema_20 = df_today['Close'].ewm(span=20).mean().iloc[-1]
+        last_price = df_today['Close'].iloc[-1]
+        ema_dist = ((last_price - ema_20) / ema_20) * 100
+        
+        # 4. ORB Calculation
         df_today["Time"] = df_today.index.time
         cutoff = (datetime.combine(datetime.today(), dtime(9, 15)) + timedelta(minutes=orb_mins)).time()
         orb_range = df_today[df_today["Time"] <= cutoff]
         
         if orb_range.empty: return None
+        high_level, low_level = orb_range["High"].max(), orb_range["Low"].min()
         
-        high, low = orb_range["High"].max(), orb_range["Low"].min()
-        last = df_today["Close"].iloc[-1]
-        
-        # Signal Result
         res = {
             "Symbol": symbol,
-            "Price": round(last, 2),
-            "Vol_Shock": round(vol_ratio, 2),
-            "Signal": "Neutral",
-            "Level": 0.0
+            "Price": round(last_price, 2),
+            "Vol_Shock": round(vol_shock, 2),
+            "EMA_Dist_%": round(ema_dist, 2),
+            "Above_Prev_High": "Yes" if last_price > prev_day_high else "No",
+            "Signal": "Neutral"
         }
 
-        if last > high:
-            res.update({"Signal": "BUY", "Level": round(high, 2)})
-        elif last < low:
-            res.update({"Signal": "SELL", "Level": round(low, 2)})
+        if last_price > high_level: res["Signal"] = "BUY"
+        elif last_price < low_level: res["Signal"] = "SELL"
             
         return res
     except:
         return None
 
 # ================================
-# SIDEBAR & INPUTS
+# UI LAYOUT
 # ================================
 all_symbols = get_mega_universe()
 
 with st.sidebar:
-    st.header("⚡ Institutional Controls")
-    orb_minutes = st.number_input("ORB Timeframe", 5, 60, 15)
-    min_vol_ratio = st.slider("Min Vol Shock (vs Prev Day)", 0.5, 5.0, 1.5)
-    max_threads = st.slider("Threads", 20, 150, 100)
+    st.header("⚙️ Pro Filters")
+    orb_mins = st.number_input("ORB Minutes", 5, 60, 15)
+    min_vol = st.slider("Min Vol Shock", 0.5, 5.0, 1.5)
+    max_ema_dist = st.slider("Max EMA Distance %", 1.0, 5.0, 2.5)
+    threads = st.slider("Threads", 20, 150, 100)
     
     st.divider()
-    st.subheader("📊 Top 100 Volume Gainers")
-    vol_placeholder = st.empty()
+    st.subheader("📊 Top 100 Volume Shockers")
+    sidebar_vol = st.empty()
 
 # ================================
-# EXECUTION LOGIC
+# EXECUTION
 # ================================
-m1, m2, m3 = st.columns(3)
-p_bar_text = m1.empty()
-scan_metric = m2.empty()
-signal_metric = m3.empty()
-progress_bar = st.progress(0)
+col1, col2, col3 = st.columns(3)
+p_bar = st.progress(0)
+status = col1.empty()
+m_scan = col2.empty()
+m_sig = col3.empty()
 
-start_button = st.button(f"🔥 Run Deep Scan ({len(all_symbols)} Stocks)")
-
-if start_button or market_open:
-    all_results = []
-    scanned_count = 0
-    total = len(all_symbols)
-
-    with ThreadPoolExecutor(max_workers=max_threads) as executor:
-        futures = {executor.submit(scan_stock, s, orb_minutes): s for s in all_symbols}
-        
-        for future in as_completed(futures):
-            scanned_count += 1
+if st.button(f"🔥 Deep Scan {len(all_symbols)} Stocks"):
+    results = []
+    with ThreadPoolExecutor(max_workers=threads) as executor:
+        futures = {executor.submit(scan_stock_pro, s, orb_mins): s for s in all_symbols}
+        for i, future in enumerate(as_completed(futures)):
             res = future.result()
-            if res:
-                all_results.append(res)
-            
-            if scanned_count % 25 == 0 or scanned_count == total:
-                progress_bar.progress(scanned_count / total)
-                p_bar_text.text(f"Processing: {futures[future]}")
-                scan_metric.metric("Total Scanned", f"{scanned_count}/{total}")
-                
-    if all_results:
-        full_df = pd.DataFrame(all_results)
+            if res: results.append(res)
+            if i % 25 == 0:
+                p_bar.progress((i+1)/len(all_symbols))
+                m_scan.metric("Scanned", f"{i+1}/{len(all_symbols)}")
+
+    if results:
+        full_df = pd.DataFrame(results)
         
-        # 1. Update Sidebar with Volume Gainers
-        top_vol = full_df.sort_values(by="Vol_Shock", ascending=False).head(100)
-        vol_placeholder.dataframe(top_vol[["Symbol", "Vol_Shock"]], height=400)
+        # Sidebar Update
+        top_100 = full_df.sort_values("Vol_Shock", ascending=False).head(100)
+        sidebar_vol.dataframe(top_100[["Symbol", "Vol_Shock"]], height=400)
         
-        # 2. Filter for ORB Qualified Signals (Breakout + High Vol)
+        # High Conviction Filter
         qualified = full_df[
             (full_df["Signal"] != "Neutral") & 
-            (full_df["Vol_Shock"] >= min_vol_ratio)
+            (full_df["Vol_Shock"] >= min_vol) &
+            (full_df["EMA_Dist_%"].abs() <= max_ema_dist)
         ]
         
-        signal_metric.metric("High-Conviction Signals", len(qualified))
+        m_sig.metric("High Conviction", len(qualified))
         
-        st.divider()
-        st.subheader("🎯 Qualified Breakouts (Institutional Footprint Found)")
-        if not qualified.empty:
-            st.dataframe(qualified.sort_values(by="Vol_Shock", ascending=False), use_container_width=True)
-        else:
-            st.info("Scanning complete. No stocks met both ORB and Volume Shock criteria yet.")
-            
-        # 3. Analytics Chart
-        st.subheader("📈 Volatility vs Volume Shock")
-        fig = go.Figure(data=go.Scatter(
-            x=full_df["Vol_Shock"], 
-            y=full_df["Price"], 
-            mode='markers',
-            marker=dict(size=8, color=full_df["Vol_Shock"], colorscale='Viridis', showscale=True),
-            text=full_df["Symbol"]
-        ))
-        fig.update_layout(xaxis_title="Volume Shock Ratio", yaxis_title="Price")
-        st.plotly_chart(fig, use_container_width=True)
+        st.subheader("🎯 High Conviction Signals")
+        st.write("Criteria: ORB Breakout + Vol Shock + Within EMA Range")
+        st.dataframe(qualified.sort_values("Vol_Shock", ascending=False), use_container_width=True)
 
-st.caption(f"Last Heartbeat: {datetime.now().strftime('%H:%M:%S')} | Total Universe: {len(all_symbols)}")
+st.write(f"Last Scan: {datetime.now().strftime('%H:%M:%S')}")
