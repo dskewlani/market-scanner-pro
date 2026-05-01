@@ -13,42 +13,33 @@ from streamlit_autorefresh import st_autorefresh
 # CONFIG
 # ================================
 st.set_page_config(page_title="ORB V22 Mass Scanner", layout="wide")
-st.title("🚀 ORB V22 (Full Segment Scanner)")
-
-INITIAL_CAPITAL = 100000
+st.title("🚀 ORB V22 (Full NSE Universe Scanner)")
 
 # ================================
-# DYNAMIC UNIVERSE LOADER
+# DYNAMIC FULL UNIVERSE LOADER
 # ================================
 @st.cache_data
-def get_full_universe(category):
-    # In a production environment, you would use:
-    # pd.read_csv("https://archives.nseindia.com/content/indices/ind_nifty500list.csv")
-    
-    # Representative expanded lists for demonstration:
-    if category == "Large Cap (Nifty 100)":
-        # Full Nifty 50 + Nifty Next 50 (~100 Stocks)
-        return [
-            "RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "ICICIBANK.NS", "INFY.NS", "BHARTIARTL.NS", 
-            "ITC.NS", "SBIN.NS", "LTIM.NS", "BAJFINANCE.NS", "HINDUNILVR.NS", "LT.NS", "ADANIENT.NS",
-            "AXISBANK.NS", "SUNPHARMA.NS", "KOTAKBANK.NS", "TITAN.NS", "ULTRACEMCO.NS", "NTPC.NS",
-            "M&M.NS", "MARUTI.NS", "ONGC.NS", "POWERGRID.NS", "TATASTEEL.NS", "COALINDIA.NS"
-            # ... imagine full 100 here
-        ]
-    
-    elif category == "Mid Cap (Nifty Midcap 150)":
-        # Simulating the Midcap 150 Universe
-        midcap_base = ["TATAPOWER.NS", "VOLTAS.NS", "CUMMINSIND.NS", "AUROPHARMA.NS", "POLYCAB.NS", 
-                       "COFORGE.NS", "CONCOR.NS", "DIXON.NS", "MAXHEALTH.NS", "YESBANK.NS", "IDFCFIRSTB.NS"]
-        return midcap_base * 14  # Scaling to ~150 stocks
+def get_all_nse_symbols(segment_choice):
+    """
+    Fetches the full list of symbols directly from NSE index files 
+    to ensure 100% coverage of the category.
+    """
+    try:
+        if segment_choice == "Nifty 500 (All Large/Mid/Small)":
+            url = "https://archives.nseindia.com/content/indices/ind_nifty500list.csv"
+        elif segment_choice == "Nifty 100 (Large Cap)":
+            url = "https://archives.nseindia.com/content/indices/ind_nifty100list.csv"
+        elif segment_choice == "Nifty Midcap 150":
+            url = "https://archives.nseindia.com/content/indices/ind_niftymidcap150list.csv"
+        else: # Smallcap 250
+            url = "https://archives.nseindia.com/content/indices/ind_nifty_smallcap250list.csv"
         
-    elif category == "Small Cap (NSE Smallcap 250+)":
-        # Simulating the Smallcap 250+ Universe
-        smallcap_base = ["ZENSARTECH.NS", "RITES.NS", "NBCC.NS", "HFCL.NS", "IEX.NS", "KEI.NS", 
-                         "SUZLON.NS", "SOUTHBANK.NS", "RVNL.NS", "IRFC.NS", "MASTEK.NS"]
-        return smallcap_base * 25  # Scaling to ~275+ stocks
-
-    return ["RELIANCE.NS"]
+        df = pd.read_csv(url)
+        # Yahoo Finance requires .NS suffix for NSE
+        return [str(s) + ".NS" for s in df['Symbol'].tolist()]
+    except Exception as e:
+        st.error(f"Error fetching NSE list: {e}")
+        return ["RELIANCE.NS", "TCS.NS", "INFY.NS"]
 
 # ================================
 # MARKET HOURS
@@ -64,43 +55,40 @@ st_autorefresh(interval=60 * 1000 if market_open else 300 * 1000, key="auto_refr
 # SIDEBAR
 # ================================
 with st.sidebar:
-    st.header("⚙️ Scanner Configuration")
-    segment = st.selectbox("Select Target Universe", 
-                            ["Large Cap (Nifty 100)", 
-                             "Mid Cap (Nifty Midcap 150)", 
-                             "Small Cap (NSE Smallcap 250+)"])
+    st.header("⚙️ Scanner Engine")
+    segment = st.selectbox("Select Scanning Universe", 
+                            ["Nifty 500 (All Large/Mid/Small)", 
+                             "Nifty 100 (Large Cap)", 
+                             "Nifty Midcap 150", 
+                             "Nifty Smallcap 250"])
     
-    symbols_to_scan = get_full_universe(segment)
+    symbols_to_scan = get_all_nse_symbols(segment)
     
     st.divider()
-    orb_minutes = st.number_input("ORB Timeframe (Mins)", 5, 60, 15)
-    risk_pct = st.slider("Risk % per Trade", 0.1, 2.0, 1.0)
+    orb_minutes = st.number_input("ORB Mins", 5, 60, 15)
+    risk_pct = st.slider("Risk %", 0.1, 2.0, 1.0)
     
-    # Speed Control
-    max_workers = st.slider("Scan Speed (Parallel Threads)", 10, 100, 40)
-    st.info(f"Ready to scan {len(symbols_to_scan)} shares in {segment}.")
+    # Critical for 500+ stocks: High thread count
+    max_workers = st.slider("Scan Threads (Speed)", 20, 100, 60)
+    st.warning(f"Total stocks in queue: {len(symbols_to_scan)}")
 
 # ================================
 # SESSION STATE
 # ================================
-if "capital" not in st.session_state: st.session_state.capital = INITIAL_CAPITAL
+if "capital" not in st.session_state: st.session_state.capital = 100000
 if "active_trades" not in st.session_state: st.session_state.active_trades = {}
-if "closed_trades" not in st.session_state: st.session_state.closed_trades = []
 if "equity" not in st.session_state: st.session_state.equity = []
 
 # ================================
-# ANALYSIS ENGINE
+# SCANNER FUNCTION
 # ================================
-def analyze_stock(symbol):
+def process_stock(symbol):
     try:
+        # Fetching minimal data for speed
         df = yf.download(symbol, interval="5m", period="1d", progress=False, threads=False)
         if df is None or len(df) < 10: return None
         
-        # Technical Filters
-        df["EMA"] = df["Close"].ewm(span=20).mean()
-        df["Vol_Avg"] = df["Volume"].rolling(20).mean()
-        
-        # ORB Calculation
+        # ORB Logic
         df["Time"] = df.index.time
         cutoff = (datetime.combine(datetime.today(), dtime(9, 15)) + pd.Timedelta(minutes=orb_minutes)).time()
         orb_df = df[df["Time"] <= cutoff]
@@ -110,78 +98,67 @@ def analyze_stock(symbol):
         high, low = orb_df["High"].max(), orb_df["Low"].min()
         last = df["Close"].iloc[-1]
         
-        # Condition: Breakout + Volume + EMA Distance
-        if last > high and df["Volume"].iloc[-1] > df["Vol_Avg"].iloc[-1]:
-            return {"symbol": symbol, "signal": "BUY", "price": last, "sl": low}
-        elif last < low and df["Volume"].iloc[-1] > df["Vol_Avg"].iloc[-1]:
-            return {"symbol": symbol, "signal": "SELL", "price": last, "sl": high}
+        if last > high:
+            return {"symbol": symbol, "signal": "BUY", "price": round(last, 2), "sl": round(low, 2)}
+        elif last < low:
+            return {"symbol": symbol, "signal": "SELL", "price": round(last, 2), "sl": round(high, 2)}
             
         return None
     except:
         return None
 
 # ================================
-# MAIN SCANNER UI
+# MAIN UI & EXECUTION
 # ================================
-st.subheader(f"🔍 Active Engine: Scanning {segment}")
-m1, m2, m3 = st.columns(3)
-progress_text = m1.empty()
-scan_metric = m2.empty()
-signal_metric = m3.empty()
+st.subheader(f"📊 Real-Time Engine: {segment}")
+col1, col2, col3 = st.columns(3)
+p_bar_text = col1.empty()
+scan_metric = col2.empty()
+signal_metric = col3.empty()
 
 progress_bar = st.progress(0)
-start_scan = st.button("🚀 Run Full Universe Scan")
+start_scan = st.button(f"🚀 Start Full {len(symbols_to_scan)} Share Scan")
 
 if start_scan or market_open:
-    results = []
+    found_signals = []
     scanned_count = 0
-    total_symbols = len(symbols_to_scan)
+    total = len(symbols_to_scan)
 
-    # Parallel Execution for Mass Data
+    # Parallel Mass Scan
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {executor.submit(analyze_stock, s): s for s in symbols_to_scan}
+        futures = {executor.submit(process_stock, s): s for s in symbols_to_scan}
         
         for future in as_completed(futures):
             scanned_count += 1
             res = future.result()
             if res:
-                results.append(res)
+                found_signals.append(res)
             
-            # LIVE UPDATES
-            percent = scanned_count / total_symbols
-            progress_bar.progress(percent)
-            progress_text.text(f"Currently Analyzing: {futures[future]}")
-            scan_metric.metric("Total Scanned", f"{scanned_count} / {total_symbols}")
-            signal_metric.metric("Signals Found", len(results))
+            # Update UI every 5 stocks to save browser resources
+            if scanned_count % 5 == 0 or scanned_count == total:
+                progress_bar.progress(scanned_count / total)
+                p_bar_text.text(f"Scanning: {futures[future]}")
+                scan_metric.metric("Shares Scanned", f"{scanned_count} / {total}")
+                signal_metric.metric("Breakouts Found", len(found_signals))
 
-    # Update Active Trades
-    for res in results:
+    # Add to Active Trades
+    for res in found_signals:
         sym = res["symbol"]
         if sym not in st.session_state.active_trades:
-            risk_amt = st.session_state.capital * (risk_pct / 100)
-            risk_per_share = abs(res["price"] - res["sl"])
-            qty = int(risk_amt / risk_per_share) if risk_per_share > 0 else 0
-            
-            if qty > 0:
-                st.session_state.active_trades[sym] = {
-                    "Type": res["signal"], "Entry": res["price"], "SL": res["sl"], "Qty": qty
-                }
+            st.session_state.active_trades[sym] = res
 
 # ================================
-# DATA DISPLAY
+# RESULTS DISPLAY
 # ================================
 st.divider()
-tab1, tab2 = st.tabs(["📊 Active Signals", "💰 Performance"])
+if st.session_state.active_trades:
+    st.subheader("✅ Live Breakout Signals")
+    st.dataframe(pd.DataFrame(st.session_state.active_trades).T, use_container_width=True)
+else:
+    st.info("No breakout signals detected in current universe.")
 
-with tab1:
-    if st.session_state.active_trades:
-        st.dataframe(pd.DataFrame(st.session_state.active_trades).T, use_container_width=True)
-    else:
-        st.info("No breakout signals detected in this cycle.")
+st.subheader("💰 Performance Tracker")
+st.session_state.equity.append({"time": datetime.now(), "capital": st.session_state.capital})
+st.line_chart(pd.DataFrame(st.session_state.equity).set_index("time"))
 
-with tab2:
-    st.metric("Net Account Liquidity", f"₹{round(st.session_state.capital, 2)}")
-    st.session_state.equity.append({"time": datetime.now(), "capital": st.session_state.capital})
-    st.line_chart(pd.DataFrame(st.session_state.equity).set_index("time"))
-
-st.write(f"✅ Last complete scan of {len(symbols_to_scan)} stocks finished at {datetime.now().strftime('%H:%M:%S')}")
+st.write(f"Last Full Scan: {datetime.now().strftime('%H:%M:%S')}")
