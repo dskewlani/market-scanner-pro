@@ -13,16 +13,22 @@ from streamlit_autorefresh import st_autorefresh
 # CONFIG
 # ================================
 st.set_page_config(page_title="ORB V22 Smart System", layout="wide")
-st.title("🚀 ORB V22 (Smart Auto + Manual Control)")
+st.title("🚀 ORB V22 (Multi-Cap Smart System)")
 
 INITIAL_CAPITAL = 100000
+
+# ================================
+# MARKET UNIVERSES
+# ================================
+LARGE_CAP = ["RELIANCE.NS", "TCS.NS", "INFY.NS", "HDFCBANK.NS", "ICICIBANK.NS", "HINDUNILVR.NS", "BHARTIARTL.NS", "SBIN.NS", "LT.NS", "ITC.NS"]
+MID_CAP = ["TATAPOWER.NS", "VOLTAS.NS", "BATAINDIA.NS", "CUMMINSIND.NS", "AUROPHARMA.NS", "POLYCAB.NS", "COFORGE.NS", "CONCOR.NS", "DIXON.NS"]
+SMALL_CAP = ["ZENSARTECH.NS", "RITES.NS", "NBCC.NS", "HFCL.NS", "IEX.NS", "KEI.NS", "CASTROLIND.NS", "MASTEK.NS"]
 
 # ================================
 # MARKET HOURS FUNCTION
 # ================================
 def is_market_open():
     now = datetime.now().time()
-    # Market hours: 9:15 AM to 3:30 PM
     return dtime(9, 15) <= now <= dtime(15, 30)
 
 market_open = is_market_open()
@@ -31,53 +37,48 @@ market_open = is_market_open()
 # SMART AUTO REFRESH
 # ================================
 if market_open:
-    refresh_interval = 30 * 1000  # 30 sec
+    refresh_interval = 30 * 1000  # 30 sec during market
 else:
-    refresh_interval = 300 * 1000  # 5 min
+    refresh_interval = 300 * 1000  # 5 min after market
 
 st_autorefresh(interval=refresh_interval, key="smart_refresh")
 
 # ================================
-# USER INPUTS
+# SIDEBAR CONTROLS
 # ================================
-col1, col2, col3 = st.columns(3)
-
-with col1:
+with st.sidebar:
+    st.header("⚙️ Strategy Settings")
     orb_minutes = st.number_input("ORB Minutes", 5, 60, 15)
-
-with col2:
     ema_period = st.number_input("EMA Period", 5, 100, 20)
-
-with col3:
-    risk_pct = st.slider("Risk %", 0.5, 2.0, 1.0)
-
-# ================================
-# MANUAL SCAN BUTTON
-# ================================
-manual_scan = st.button("🔄 Scan Now (Manual)")
+    risk_pct = st.slider("Risk % per Trade", 0.1, 2.0, 1.0)
+    
+    st.divider()
+    st.header("🏢 Scan Universe")
+    segment = st.selectbox("Select Segment", ["Large Cap", "Mid Cap", "Small Cap", "Custom List"])
+    
+    if segment == "Large Cap":
+        target_symbols = LARGE_CAP
+    elif segment == "Mid Cap":
+        target_symbols = MID_CAP
+    elif segment == "Small Cap":
+        target_symbols = SMALL_CAP
+    else:
+        target_symbols = ["RELIANCE.NS", "TCS.NS"] # Default Custom
 
 # ================================
 # SESSION STATE
 # ================================
 if "capital" not in st.session_state:
     st.session_state.capital = INITIAL_CAPITAL
-
 if "active_trades" not in st.session_state:
     st.session_state.active_trades = {}
-
 if "closed_trades" not in st.session_state:
     st.session_state.closed_trades = []
-
 if "equity" not in st.session_state:
     st.session_state.equity = []
 
 # ================================
-# SYMBOLS
-# ================================
-symbols = ["RELIANCE.NS", "TCS.NS", "INFY.NS", "HDFCBANK.NS", "ICICIBANK.NS", "SBIN.NS"]
-
-# ================================
-# FETCH
+# CORE LOGIC FUNCTIONS
 # ================================
 def fetch(symbol):
     try:
@@ -87,235 +88,120 @@ def fetch(symbol):
     except:
         return symbol, None
 
-# ================================
-# INDICATORS
-# ================================
-def add_indicators(df):
-    df["EMA"] = df["Close"].ewm(span=ema_period).mean()
-
-    df["H-L"] = df["High"] - df["Low"]
-    df["H-PC"] = abs(df["High"] - df["Close"].shift(1))
-    df["L-PC"] = abs(df["Low"] - df["Close"].shift(1))
-    df["TR"] = df[["H-L", "H-PC", "L-PC"]].max(axis=1)
-    df["ATR"] = df["TR"].rolling(14).mean()
-
-    df["Vol_Avg"] = df["Volume"].rolling(20).mean()
-
-    body = abs(df["Close"] - df["Open"])
-    rng = (df["High"] - df["Low"]).replace(0, 1e-9)
-    df["BodyPct"] = body / rng
-
-    return df
-
-# ================================
-# FILTERS
-# ================================
-def breakout_confirmed(df, level, direction):
-    last = df["Close"].iloc[-1]
-    prev = df["Close"].iloc[-2]
-    return (prev > level and last > level) if direction == "BUY" else (prev < level and last < level)
-
-def strong_candle(df):
-    return df["BodyPct"].iloc[-1] >= 0.6
-
-def volume_quality(df):
-    return df["Volume"].iloc[-1] > df["Vol_Avg"].iloc[-1] * 1.8
-
-def ema_distance_ok(df):
-    price = df["Close"].iloc[-1]
-    ema = df["EMA"].iloc[-1]
-    dist = abs(price - ema) / ema
-    return 0.005 <= dist <= 0.02
-
-def atr_filter(df):
-    return (df["ATR"].iloc[-1] / df["Close"].iloc[-1]) > 0.003
-
-# ================================
-# SIGNAL
-# ================================
 def get_signal(df):
-    df = add_indicators(df)
+    # Indicator Logic
+    df["EMA"] = df["Close"].ewm(span=ema_period).mean()
+    df["Vol_Avg"] = df["Volume"].rolling(20).mean()
+    
+    # ORB Logic
     df["Time"] = df.index.time
-
-    cutoff = (datetime.combine(datetime.today(), dtime(9, 15)) +
-              pd.Timedelta(minutes=orb_minutes)).time()
-
+    cutoff = (datetime.combine(datetime.today(), dtime(9, 15)) + pd.Timedelta(minutes=orb_minutes)).time()
     orb_df = df[df["Time"] <= cutoff]
 
-    if orb_df.empty:
-        return None
+    if orb_df.empty: return None
 
-    high = orb_df["High"].max()
-    low = orb_df["Low"].min()
+    high, low = orb_df["High"].max(), orb_df["Low"].min()
     last = df["Close"].iloc[-1]
 
-    if last > high:
-        direction = "BUY"
-        level = high
-    elif last < low:
-        direction = "SELL"
-        level = low
-    else:
-        return None
+    # Filters
+    body = abs(df["Close"] - df["Open"])
+    rng = (df["High"] - df["Low"]).replace(0, 1e-9)
+    body_pct = (body / rng).iloc[-1]
+    vol_ratio = (df["Volume"].iloc[-1] / df["Vol_Avg"].iloc[-1])
 
-    if not breakout_confirmed(df, level, direction):
-        return None
-    if not strong_candle(df):
-        return None
-    if not volume_quality(df):
-        return None
-    if not ema_distance_ok(df):
-        return None
-    if not atr_filter(df):
-        return None
+    if last > high and body_pct >= 0.6 and vol_ratio > 1.5:
+        return "BUY", last, high, low
+    elif last < low and body_pct >= 0.6 and vol_ratio > 1.5:
+        return "SELL", last, high, low
+    
+    return None
 
-    return direction, last, high, low
-
-# ================================
-# POSITION SIZE
-# ================================
 def calculate_qty(entry, sl):
-    risk_amount = st.session_state.capital * (risk_pct / 100)
+    risk_amt = st.session_state.capital * (risk_pct / 100)
     risk_per_share = abs(entry - sl)
-    return int(risk_amount / risk_per_share) if risk_per_share > 0 else 0
+    return int(risk_amt / risk_per_share) if risk_per_share > 0 else 0
 
 # ================================
-# TRADE LOGIC
+# MAIN SCANNER EXECUTION
 # ================================
-def enter_trade(symbol, signal, price, high, low):
-    sl = low if signal == "BUY" else high
-    qty = calculate_qty(price, sl)
-    
-    if qty > 0:
-        st.session_state.active_trades[symbol] = {
-            "type": signal,
-            "entry": price,
-            "sl": sl,
-            "qty": qty,
-            "time": datetime.now().strftime("%H:%M:%S")
-        }
+st.subheader(f"🔍 Scanner Status: {segment}")
+manual_scan = st.button("🔄 Force Manual Scan")
 
-def manage_trade(symbol, df):
-    trade = st.session_state.active_trades[symbol]
-    price = df["Close"].iloc[-1]
-
-    if trade["type"] == "BUY":
-        trade["sl"] = max(trade["sl"], price * 0.995)
-        if price <= trade["sl"]:
-            pnl = (price - trade["entry"]) * trade["qty"]
-            exit_trade(symbol, price, pnl)
-    else:
-        trade["sl"] = min(trade["sl"], price * 1.005)
-        if price >= trade["sl"]:
-            pnl = (trade["entry"] - price) * trade["qty"]
-            exit_trade(symbol, price, pnl)
-
-def exit_trade(symbol, price, pnl):
-    trade = st.session_state.active_trades.pop(symbol)
-    st.session_state.capital += pnl
-
-    st.session_state.closed_trades.append({
-        "Symbol": symbol,
-        "Entry": trade["entry"],
-        "Exit": price,
-        "PnL": round(pnl, 2),
-        "Time": datetime.now().strftime("%H:%M:%S")
-    })
-
-# ================================
-# RUN SCANNER WITH PROGRESS
-# ================================
-run_scan = market_open or manual_scan
-
-if not market_open:
-    st.warning("⏸ Market Closed – Auto scan paused. Use manual button to force check.")
-
-if run_scan:
-    st.subheader("🔍 Live Scanner Status")
-    
-    # Progress placeholders
+if market_open or manual_scan:
     progress_bar = st.progress(0)
-    status_text = st.empty()
+    status_msg = st.empty()
     
     qualified_count = 0
+    scanned_count = 0
     scanned_names = []
 
-    # Parallel Fetch
-    with ThreadPoolExecutor(max_workers=5) as executor:
-        data = list(executor.map(fetch, symbols))
+    # Parallel Data Fetching
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        data = list(executor.map(fetch, target_symbols))
 
-    # Processing and Signal Check
     for i, (symbol, df) in enumerate(data):
-        # Update progress bar
-        pct = int(((i + 1) / len(symbols)) * 100)
+        scanned_count += 1
+        pct = scanned_count / len(target_symbols)
         progress_bar.progress(pct)
-        status_text.text(f"Scanning: {symbol}")
+        status_msg.text(f"Processing Stock {scanned_count}/{len(target_symbols)}: {symbol}")
         scanned_names.append(symbol)
 
-        if df is None or len(df) < 30:
-            continue
-
-        # Check if already in trade
-        if symbol in st.session_state.active_trades:
-            manage_trade(symbol, df)
-            qualified_count += 1
-        else:
-            signal = get_signal(df)
-            if signal:
-                enter_trade(symbol, *signal)
+        if df is not None and len(df) > 10:
+            if symbol not in st.session_state.active_trades:
+                signal = get_signal(df)
+                if signal:
+                    dir, price, h, l = signal
+                    sl = l if dir == "BUY" else h
+                    qty = calculate_qty(price, sl)
+                    if qty > 0:
+                        st.session_state.active_trades[symbol] = {
+                            "Type": dir, "Entry": price, "SL": sl, "Qty": qty, "Time": datetime.now().strftime("%H:%M")
+                        }
+                        qualified_count += 1
+            else:
+                # If already in trade, it counts as a qualified equity for this session
                 qualified_count += 1
-
-    # Cleanup progress UI
-    status_text.success(f"✅ Scan Complete at {datetime.now().strftime('%H:%M:%S')}")
     
-    # Display scanning metrics
-    m1, m2 = st.columns(2)
-    m1.info(f"**Shares Scanned:** {', '.join(scanned_names)}")
-    m2.metric("Qualified / Active Trades", qualified_count)
+    status_msg.success(f"✅ Scan Finished! Total Scanned: {scanned_count} | Qualified/Active: {qualified_count}")
+    st.caption(f"Symbols checked: {', '.join(scanned_names)}")
+else:
+    st.info("⏸ Market is currently closed. Auto-refresh is on 5-minute standby.")
 
 # ================================
-# EQUITY TRACKING
+# DASHBOARD LAYOUT
 # ================================
-st.session_state.equity.append({
-    "time": datetime.now(),
-    "capital": st.session_state.capital
-})
-equity_df = pd.DataFrame(st.session_state.equity)
+col_metric1, col_metric2, col_metric3 = st.columns(3)
+col_metric1.metric("Current Capital", f"₹{round(st.session_state.capital, 2)}")
+col_metric2.metric("Active Trades", len(st.session_state.active_trades))
+col_metric3.metric("Segment Universe", len(target_symbols))
 
-# ================================
-# DISPLAY UI
-# ================================
 st.divider()
 
-col_left, col_right = st.columns([1, 1])
-
-with col_left:
+t_col1, t_col2 = st.columns(2)
+with t_col1:
     st.subheader("📈 Active Positions")
     if st.session_state.active_trades:
-        st.table(pd.DataFrame(st.session_state.active_trades).T)
+        st.dataframe(pd.DataFrame(st.session_state.active_trades).T, use_container_width=True)
     else:
-        st.write("No active positions.")
+        st.write("No active trades.")
 
-with col_right:
-    st.subheader("📜 Trade History")
+with t_col2:
+    st.subheader("📜 Closed Trades")
     if st.session_state.closed_trades:
         st.dataframe(pd.DataFrame(st.session_state.closed_trades), use_container_width=True)
     else:
-        st.write("No closed trades yet.")
+        st.write("History is empty.")
 
-st.divider()
-st.subheader("📊 Performance & Equity Curve")
+# ================================
+# EQUITY CURVE
+# ================================
+st.session_state.equity.append({"time": datetime.now(), "capital": st.session_state.capital})
+eq_df = pd.DataFrame(st.session_state.equity)
 
+st.subheader("📊 Equity Curve")
 fig = go.Figure()
-fig.add_trace(go.Scatter(
-    x=equity_df["time"],
-    y=equity_df["capital"],
-    mode="lines+markers",
-    name="Capital",
-    line=dict(color="#00FF00")
-))
-fig.update_layout(template="plotly_dark", xaxis_title="Time", yaxis_title="Equity")
+fig.add_trace(go.Scatter(x=eq_df["time"], y=eq_df["capital"], mode="lines+markers", name="Net Capital"))
+fig.update_layout(template="plotly_dark", margin=dict(l=20, r=20, t=20, b=20))
 st.plotly_chart(fig, use_container_width=True)
 
-st.metric("Total Account Value", f"₹{round(st.session_state.capital, 2)}")
-st.write(f"Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+st.write(f"🕒 Last Engine Pulse: {datetime.now().strftime('%H:%M:%S')}")
