@@ -1,146 +1,92 @@
 import streamlit as st
 import pandas as pd
 import yfinance as yf
+import time
 from datetime import datetime, time as dtime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from streamlit_autorefresh import st_autorefresh
 
-# ================================
-# CONFIG & REFRESH
-# ================================
-st.set_page_config(page_title="ORB V22 Pro", layout="wide")
-st.title("🚀 ORB V22 Mega-Scanner (Pro Edition)")
+st.set_page_config(page_title="ORB V22 Mega-Stable", layout="wide")
+st.title("🚀 ORB V22 (Stable 2500+ Scanner)")
 
-if "capital" not in st.session_state: st.session_state.capital = 100000
-
-# Auto-refresh every 2 minutes during market hours
-st_autorefresh(interval=120 * 1000, key="pro_refresh")
-
-# ================================
-# DATA FETCHING (2500+ STOCKS)
-# ================================
+# --- UNIVERSE LOADER ---
 @st.cache_data
 def get_mega_universe():
     urls = [
         "https://archives.nseindia.com/content/indices/ind_nifty500list.csv",
         "https://archives.nseindia.com/content/indices/ind_niftymicrocap250_list.csv",
-        "https://archives.nseindia.com/content/indices/ind_nifty_smallcap250list.csv",
-        "https://archives.nseindia.com/content/indices/ind_niftymidcap150list.csv"
+        "https://archives.nseindia.com/content/indices/ind_nifty_smallcap250list.csv"
     ]
-    all_symbols = set()
+    all_syms = set()
     for url in urls:
         try:
             df = pd.read_csv(url)
-            sym_col = [c for c in df.columns if 'Symbol' in c][0]
-            for s in df[sym_col].astype(str).tolist():
-                if s != 'Symbol': all_symbols.add(s + ".NS")
+            col = [c for c in df.columns if 'Symbol' in c][0]
+            for s in df[col].dropna(): all_syms.add(str(s) + ".NS")
         except: continue
-    return sorted(list(all_symbols))
+    return sorted(list(all_syms))
 
-# ================================
-# ANALYSIS ENGINE
-# ================================
-def scan_stock_pro(symbol, orb_mins):
+# --- SINGLE STOCK LOGIC ---
+def fetch_and_analyze(symbol, orb_mins):
     try:
-        # Pull 3 days of data for Yesterday's High and Volume Average
-        df = yf.download(symbol, period="3d", interval="5m", progress=False, threads=False)
-        if df is None or len(df) < 20: return None
+        # Requesting ONLY 2 days to minimize data payload
+        df = yf.download(symbol, period="2d", interval="5m", progress=False, threads=False, timeout=10)
+        if df is None or len(df) < 10: return None
         
-        today_date = df.index.date[-1]
-        df_today = df[df.index.date == today_date].copy()
-        df_prev = df[df.index.date < today_date].copy()
+        today = df.index.date[-1]
+        df_today = df[df.index.date == today].copy()
         
-        if df_today.empty or df_prev.empty: return None
-
-        # 1. Multi-Timeframe Filter (Prev Day High)
-        prev_day_high = df_prev['High'].max()
-        
-        # 2. Volume Shock (Today's Total vs Yesterday's Total)
-        vol_shock = df_today['Volume'].sum() / (df_prev[df_prev.index.date == df_prev.index.date[-1]]['Volume'].sum() + 1)
-        
-        # 3. EMA Distance (Overextension Check)
-        ema_20 = df_today['Close'].ewm(span=20).mean().iloc[-1]
-        last_price = df_today['Close'].iloc[-1]
-        ema_dist = ((last_price - ema_20) / ema_20) * 100
-        
-        # 4. ORB Calculation
-        df_today["Time"] = df_today.index.time
         cutoff = (datetime.combine(datetime.today(), dtime(9, 15)) + timedelta(minutes=orb_mins)).time()
-        orb_range = df_today[df_today["Time"] <= cutoff]
+        orb_df = df_today[df_today.index.time <= cutoff]
         
-        if orb_range.empty: return None
-        high_level, low_level = orb_range["High"].max(), orb_range["Low"].min()
+        if orb_df.empty: return None
         
-        res = {
-            "Symbol": symbol,
-            "Price": round(last_price, 2),
-            "Vol_Shock": round(vol_shock, 2),
-            "EMA_Dist_%": round(ema_dist, 2),
-            "Above_Prev_High": "Yes" if last_price > prev_day_high else "No",
-            "Signal": "Neutral"
-        }
-
-        if last_price > high_level: res["Signal"] = "BUY"
-        elif last_price < low_level: res["Signal"] = "SELL"
+        high, low = orb_df["High"].max(), orb_df["Low"].min()
+        last = df_today["Close"].iloc[-1]
+        vol_ratio = df_today["Volume"].sum() / (df[df.index.date < today]["Volume"].sum() + 1)
+        
+        signal = "Neutral"
+        if last > high: signal = "BUY"
+        elif last < low: signal = "SELL"
             
-        return res
+        return {"Symbol": symbol, "Price": round(last, 2), "Signal": signal, "Vol_Shock": round(vol_ratio, 2)}
     except:
         return None
 
-# ================================
-# UI LAYOUT
-# ================================
-all_symbols = get_mega_universe()
-
+# --- UI CONTROLS ---
+all_stocks = get_mega_universe()
 with st.sidebar:
-    st.header("⚙️ Pro Filters")
-    orb_mins = st.number_input("ORB Minutes", 5, 60, 15)
-    min_vol = st.slider("Min Vol Shock", 0.5, 5.0, 1.5)
-    max_ema_dist = st.slider("Max EMA Distance %", 1.0, 5.0, 2.5)
-    threads = st.slider("Threads", 20, 150, 100)
-    
-    st.divider()
-    st.subheader("📊 Top 100 Volume Shockers")
-    sidebar_vol = st.empty()
+    st.info(f"Universe: {len(all_stocks)} Stocks")
+    orb_val = st.number_input("ORB Mins", 5, 60, 15)
+    batch_size = st.slider("Batch Size", 20, 100, 50) # Small batches prevent IP blocking
+    workers = st.slider("Threads", 10, 50, 20) # Lower threads = higher success rate
 
-# ================================
-# EXECUTION
-# ================================
-col1, col2, col3 = st.columns(3)
-p_bar = st.progress(0)
-status = col1.empty()
-m_scan = col2.empty()
-m_sig = col3.empty()
-
-if st.button(f"🔥 Deep Scan {len(all_symbols)} Stocks"):
+# --- EXECUTION ---
+if st.button(f"Scan All {len(all_stocks)} Shares"):
     results = []
-    with ThreadPoolExecutor(max_workers=threads) as executor:
-        futures = {executor.submit(scan_stock_pro, s, orb_mins): s for s in all_symbols}
-        for i, future in enumerate(as_completed(futures)):
-            res = future.result()
-            if res: results.append(res)
-            if i % 25 == 0:
-                p_bar.progress((i+1)/len(all_symbols))
-                m_scan.metric("Scanned", f"{i+1}/{len(all_symbols)}")
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    
+    # Process in Batches
+    for i in range(0, len(all_stocks), batch_size):
+        batch = all_stocks[i : i + batch_size]
+        status_text.text(f"Scanning Batch {i//batch_size + 1}...")
+        
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            future_to_stock = {executor.submit(fetch_and_analyze, s, orb_val): s for s in batch}
+            for future in as_completed(future_to_stock):
+                res = future.result()
+                if res: results.append(res)
+        
+        # Update Progress
+        prog = min((i + batch_size) / len(all_stocks), 1.0)
+        progress_bar.progress(prog)
+        
+        # SMALL COOL DOWN to avoid Yahoo Ban
+        time.sleep(1.5) 
 
     if results:
-        full_df = pd.DataFrame(results)
-        
-        # Sidebar Update
-        top_100 = full_df.sort_values("Vol_Shock", ascending=False).head(100)
-        sidebar_vol.dataframe(top_100[["Symbol", "Vol_Shock"]], height=400)
-        
-        # High Conviction Filter
-        qualified = full_df[
-            (full_df["Signal"] != "Neutral") & 
-            (full_df["Vol_Shock"] >= min_vol) &
-            (full_df["EMA_Dist_%"].abs() <= max_ema_dist)
-        ]
-        
-        m_sig.metric("High Conviction", len(qualified))
-        
-        st.subheader("🎯 High Conviction Signals")
-        st.write("Criteria: ORB Breakout + Vol Shock + Within EMA Range")
-        st.dataframe(qualified.sort_values("Vol_Shock", ascending=False), use_container_width=True)
-
-st.write(f"Last Scan: {datetime.now().strftime('%H:%M:%S')}")
+        res_df = pd.DataFrame(results)
+        st.success(f"Scan Complete! Found {len(res_df[res_df['Signal'] != 'Neutral'])} signals.")
+        st.dataframe(res_df[res_df["Signal"] != "Neutral"].sort_values("Vol_Shock", ascending=False))
+    else:
+        st.warning("No data returned. Yahoo Finance might be blocking requests. Try a smaller batch size.")
