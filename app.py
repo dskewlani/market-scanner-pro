@@ -6,37 +6,49 @@ import pandas as pd
 import yfinance as yf
 from datetime import datetime, time
 from concurrent.futures import ThreadPoolExecutor
-import base64
+import requests
+from streamlit_autorefresh import st_autorefresh
 
 # ================================
-# PAGE CONFIG
+# CONFIG
 # ================================
-st.set_page_config(page_title="ORB Scanner V8 Lite", layout="wide")
+st.set_page_config(page_title="ORB Scanner V8 Auto", layout="wide")
 
-st.title("⚡ ORB Scanner V8 Lite (FREE)")
-st.write("Fast ORB Scanner with Alerts + Smart Filters")
-
-# ================================
-# AUTO REFRESH (30 sec)
-# ================================
-st_autorefresh = st.experimental_rerun
-
-if st.button("🔄 Auto Refresh"):
-    st_autorefresh()
+st.title("⚡ ORB Scanner V8.2 (Fully Automatic)")
+st.write("Continuous ORB Scanner + Telegram Alerts")
 
 # ================================
-# USER INPUTS
+# TELEGRAM CONFIG
+# ================================
+TELEGRAM_TOKEN = "YOUR_TOKEN"
+TELEGRAM_CHAT_ID = "YOUR_CHAT_ID"
+
+def send_telegram(message):
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message}
+        requests.post(url, data=payload, timeout=5)
+    except:
+        pass
+
+# ================================
+# AUTO REFRESH LOOP
+# ================================
+st_autorefresh(interval=60 * 1000, key="auto_scan")
+
+# ================================
+# INPUTS
 # ================================
 category = st.selectbox(
-    "Select Market Category",
+    "Market Category",
     ["Large Cap (Nifty 50)", "Mid Cap", "Small Cap"]
 )
 
 orb_minutes = st.number_input("ORB Minutes", 1, 60, 15)
-volume_multiplier = st.slider("Volume Spike Multiplier", 1.0, 5.0, 1.5)
+volume_multiplier = st.slider("Volume Multiplier", 1.0, 5.0, 1.5)
 
 # ================================
-# STOCK UNIVERSE
+# LOAD SYMBOLS
 # ================================
 @st.cache_data(ttl=86400)
 def get_symbols(category):
@@ -54,10 +66,10 @@ def get_symbols(category):
         return []
 
 symbols = get_symbols(category)
-st.write(f"📊 Stocks Loaded: {len(symbols)}")
+st.write(f"📊 Scanning {len(symbols)} stocks...")
 
 # ================================
-# FETCH DATA (FAST)
+# FETCH DATA
 # ================================
 def fetch(symbol):
     try:
@@ -68,7 +80,7 @@ def fetch(symbol):
         return symbol, None
 
 # ================================
-# ORB LOGIC
+# PROCESS STOCK
 # ================================
 def process_stock(symbol_df):
     symbol, df = symbol_df
@@ -93,7 +105,6 @@ def process_stock(symbol_df):
     last_price = df["Close"].iloc[-1]
     prev_price = df["Close"].iloc[-2]
 
-    # breakout
     signal = None
     if last_price > orb_high:
         signal = "BUY"
@@ -103,12 +114,12 @@ def process_stock(symbol_df):
     if not signal:
         return None
 
-    # fake breakout
+    # fake breakout filter
     if (prev_price > orb_high and last_price < orb_high) or \
        (prev_price < orb_low and last_price > orb_low):
         return None
 
-    # volume
+    # volume filter
     avg_vol = df["Volume"].rolling(20).mean().iloc[-1]
     if df["Volume"].iloc[-1] < avg_vol * volume_multiplier:
         return None
@@ -116,57 +127,52 @@ def process_stock(symbol_df):
     return {
         "Symbol": symbol,
         "Price": round(last_price, 2),
-        "ORB High": round(orb_high, 2),
-        "ORB Low": round(orb_low, 2),
         "Signal": signal
     }
 
 # ================================
-# SOUND ALERT
+# SESSION STATE
 # ================================
-def play_sound():
-    sound_file = open("https://www.soundjay.com/buttons/sounds/button-3.mp3", "rb").read()
-    b64 = base64.b64encode(sound_file).decode()
-    md = f"""
-    <audio autoplay>
-    <source src="data:audio/mp3;base64,{b64}" type="audio/mp3">
-    </audio>
-    """
-    st.markdown(md, unsafe_allow_html=True)
+if "sent_alerts" not in st.session_state:
+    st.session_state.sent_alerts = set()
 
 # ================================
-# SCAN BUTTON
+# MAIN SCAN
 # ================================
-if st.button("🚀 Run Scanner"):
-    st.write("🔍 Scanning...")
+st.subheader("📊 Live Signals")
 
-    results = []
+results = []
+progress = st.progress(0)
 
-    progress = st.progress(0)
+with ThreadPoolExecutor(max_workers=10) as executor:
+    data = list(executor.map(fetch, symbols))
 
-    with ThreadPoolExecutor(max_workers=10) as executor:
-        data = list(executor.map(fetch, symbols))
+for i, item in enumerate(data):
+    res = process_stock(item)
 
-    for i, item in enumerate(data):
-        res = process_stock(item)
-        if res:
-            results.append(res)
+    if res:
+        results.append(res)
 
-        progress.progress((i + 1) / len(data))
+        key = f"{res['Symbol']}_{res['Signal']}"
 
-    # ================================
-    # OUTPUT
-    # ================================
-    if results:
-        df = pd.DataFrame(results)
-        st.success(f"🔥 {len(results)} Signals Found")
-        st.dataframe(df, use_container_width=True)
+        if key not in st.session_state.sent_alerts:
+            msg = f"🚨 ORB {res['Signal']} Signal\n{res['Symbol']} @ {res['Price']}"
+            send_telegram(msg)
+            st.session_state.sent_alerts.add(key)
 
-        play_sound()  # 🔔 alert
-    else:
-        st.info("No signals found")
+    progress.progress((i + 1) / len(data))
 
 # ================================
-# FOOTER
+# DISPLAY
 # ================================
-st.write("🕒 Time:", datetime.now().strftime("%H:%M:%S"))
+if results:
+    df = pd.DataFrame(results)
+    st.success(f"{len(results)} Signals Found")
+    st.dataframe(df, use_container_width=True)
+else:
+    st.info("No signals found")
+
+# ================================
+# TIME
+# ================================
+st.write("🕒 Last Scan:", datetime.now().strftime("%H:%M:%S"))
