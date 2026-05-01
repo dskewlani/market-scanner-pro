@@ -12,12 +12,29 @@ from streamlit_autorefresh import st_autorefresh
 # ================================
 # CONFIG
 # ================================
-st.set_page_config(page_title="ORB V21 Accuracy Pro", layout="wide")
-st.title("🎯 ORB V21 (High Accuracy Trading System)")
-
-st_autorefresh(interval=60 * 1000, key="refresh")
+st.set_page_config(page_title="ORB V22 Smart System", layout="wide")
+st.title("🚀 ORB V22 (Smart Auto + Manual Control)")
 
 INITIAL_CAPITAL = 100000
+
+# ================================
+# MARKET HOURS FUNCTION
+# ================================
+def is_market_open():
+    now = datetime.now().time()
+    return dtime(9, 15) <= now <= dtime(15, 30)
+
+market_open = is_market_open()
+
+# ================================
+# SMART AUTO REFRESH
+# ================================
+if market_open:
+    refresh_interval = 30 * 1000  # 30 sec
+else:
+    refresh_interval = 300 * 1000  # 5 min
+
+st_autorefresh(interval=refresh_interval, key="smart_refresh")
 
 # ================================
 # USER INPUTS
@@ -32,6 +49,11 @@ with col2:
 
 with col3:
     risk_pct = st.slider("Risk %", 0.5, 2.0, 1.0)
+
+# ================================
+# MANUAL SCAN BUTTON
+# ================================
+manual_scan = st.button("🔄 Scan Now (Manual)")
 
 # ================================
 # SESSION STATE
@@ -70,17 +92,14 @@ def fetch(symbol):
 def add_indicators(df):
     df["EMA"] = df["Close"].ewm(span=ema_period).mean()
 
-    # ATR
     df["H-L"] = df["High"] - df["Low"]
     df["H-PC"] = abs(df["High"] - df["Close"].shift(1))
     df["L-PC"] = abs(df["Low"] - df["Close"].shift(1))
     df["TR"] = df[["H-L", "H-PC", "L-PC"]].max(axis=1)
     df["ATR"] = df["TR"].rolling(14).mean()
 
-    # Volume
     df["Vol_Avg"] = df["Volume"].rolling(20).mean()
 
-    # Candle strength
     body = abs(df["Close"] - df["Open"])
     rng = (df["High"] - df["Low"]).replace(0, 1e-9)
     df["BodyPct"] = body / rng
@@ -88,7 +107,7 @@ def add_indicators(df):
     return df
 
 # ================================
-# ACCURACY FILTERS
+# FILTERS
 # ================================
 def breakout_confirmed(df, level, direction):
     last = df["Close"].iloc[-1]
@@ -111,10 +130,9 @@ def atr_filter(df):
     return (df["ATR"].iloc[-1] / df["Close"].iloc[-1]) > 0.003
 
 # ================================
-# ENTRY LOGIC (V21)
+# SIGNAL
 # ================================
 def get_signal(df):
-
     df = add_indicators(df)
     df["Time"] = df.index.time
 
@@ -128,7 +146,6 @@ def get_signal(df):
 
     high = orb_df["High"].max()
     low = orb_df["Low"].min()
-
     last = df["Close"].iloc[-1]
 
     if last > high:
@@ -140,7 +157,6 @@ def get_signal(df):
     else:
         return None
 
-    # Accuracy filters
     if not breakout_confirmed(df, level, direction):
         return None
     if not strong_candle(df):
@@ -160,12 +176,10 @@ def get_signal(df):
 def calculate_qty(entry, sl):
     risk_amount = st.session_state.capital * (risk_pct / 100)
     risk_per_share = abs(entry - sl)
-    if risk_per_share == 0:
-        return 0
-    return int(risk_amount / risk_per_share)
+    return int(risk_amount / risk_per_share) if risk_per_share else 0
 
 # ================================
-# TRADE FUNCTIONS
+# TRADE LOGIC
 # ================================
 def enter_trade(symbol, signal, price, high, low):
     sl = low if signal == "BUY" else high
@@ -182,7 +196,6 @@ def manage_trade(symbol, df):
     trade = st.session_state.active_trades[symbol]
     price = df["Close"].iloc[-1]
 
-    # Trailing SL
     if trade["type"] == "BUY":
         trade["sl"] = max(trade["sl"], price * 0.995)
         if price <= trade["sl"]:
@@ -206,25 +219,35 @@ def exit_trade(symbol, price, pnl):
     })
 
 # ================================
+# RUN CONDITION
+# ================================
+run_scan = market_open or manual_scan
+
+if not market_open:
+    st.warning("⏸ Market Closed – Auto scan paused")
+
+# ================================
 # RUN SCANNER
 # ================================
-with ThreadPoolExecutor(max_workers=5) as executor:
-    data = list(executor.map(fetch, symbols))
+if run_scan:
 
-for symbol, df in data:
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        data = list(executor.map(fetch, symbols))
 
-    if df is None or len(df) < 30:
-        continue
+    for symbol, df in data:
 
-    if symbol not in st.session_state.active_trades:
-        signal = get_signal(df)
-        if signal:
-            enter_trade(symbol, *signal)
-    else:
-        manage_trade(symbol, df)
+        if df is None or len(df) < 30:
+            continue
+
+        if symbol not in st.session_state.active_trades:
+            signal = get_signal(df)
+            if signal:
+                enter_trade(symbol, *signal)
+        else:
+            manage_trade(symbol, df)
 
 # ================================
-# EQUITY CURVE
+# EQUITY
 # ================================
 st.session_state.equity.append({
     "time": datetime.now(),
