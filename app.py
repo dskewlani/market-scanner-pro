@@ -4,7 +4,7 @@
 import streamlit as st
 import pandas as pd
 import yfinance as yf
-from datetime import datetime, time as dtime
+from datetime import datetime, time as dtime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import plotly.graph_objects as go
 from streamlit_autorefresh import st_autorefresh
@@ -12,145 +12,164 @@ from streamlit_autorefresh import st_autorefresh
 # ================================
 # CONFIG
 # ================================
-st.set_page_config(page_title="ORB V22 Mega Scanner", layout="wide")
-st.title("🚀 ORB V22 (Total Market 2500+ Scanner)")
+st.set_page_config(page_title="ORB V22 Institutional", layout="wide")
+st.title("🚀 ORB V22 Mega Scanner (Institutional Flow)")
 
 # ================================
-# HIGH-VOLUME SYMBOL LOADER
+# MEGA UNIVERSE LOADER
 # ================================
 @st.cache_data
 def get_mega_universe():
-    """
-    Combines major NSE indices to reach the ~2000-2500 stock mark.
-    """
     urls = [
         "https://archives.nseindia.com/content/indices/ind_nifty500list.csv",
         "https://archives.nseindia.com/content/indices/ind_niftymicrocap250_list.csv",
-        "https://archives.nseindia.com/content/indices/ind_niftysmallcap250list.csv"
+        "https://archives.nseindia.com/content/indices/ind_nifty_smallcap250list.csv",
+        "https://archives.nseindia.com/content/indices/ind_niftymidcap150list.csv"
     ]
-    
     all_symbols = set()
     for url in urls:
         try:
             df = pd.read_csv(url)
-            # Standardize column naming as different NSE files use different headers
             sym_col = [c for c in df.columns if 'Symbol' in c][0]
             for s in df[sym_col].astype(str).tolist():
-                all_symbols.add(s + ".NS")
-        except:
-            continue
-            
-    # Fallback if NSE site is down
-    if not all_symbols:
-        return ["RELIANCE.NS", "TCS.NS", "SBIN.NS"]
-        
+                if s != 'Symbol': all_symbols.add(s + ".NS")
+        except: continue
     return sorted(list(all_symbols))
 
 # ================================
-# MARKET HOURS
+# MARKET HOURS & REFRESH
 # ================================
 def is_market_open():
     now = datetime.now().time()
     return dtime(9, 15) <= now <= dtime(15, 30)
 
 market_open = is_market_open()
-# Longer refresh for mega-scans to prevent IP blocking (2 min)
 st_autorefresh(interval=120 * 1000 if market_open else 600 * 1000, key="mega_refresh")
 
 # ================================
-# SIDEBAR
+# CORE SCANNER ENGINE
 # ================================
-with st.sidebar:
-    st.header("⚙️ Mega-Engine Config")
-    all_symbols = get_mega_universe()
-    st.success(f"Universe Loaded: {len(all_symbols)} Stocks")
-    
-    st.divider()
-    orb_minutes = st.number_input("ORB Mins", 5, 60, 15)
-    
-    # Advanced Threading for 2500+ stocks
-    st.subheader("🚀 Speed Settings")
-    max_workers = st.slider("Parallel Threads", 20, 150, 80)
-    st.info("Higher threads = Faster scan, but requires better internet.")
-
-# ================================
-# CORE ANALYSIS
-# ================================
-def scan_stock(symbol):
+def scan_stock(symbol, orb_mins):
     try:
-        # download only essential data (period='1d')
-        df = yf.download(symbol, period="1d", interval="5m", progress=False, threads=False)
-        if df is None or len(df) < 5: return None
+        # Fetch 2 days of data to calculate average volume comparison
+        df = yf.download(symbol, period="2d", interval="5m", progress=False, threads=False)
+        if df is None or len(df) < 20: return None
         
-        # Indicator Math
-        df["Vol_Avg"] = df["Volume"].rolling(10).mean()
+        # Split into Yesterday and Today
+        today_date = df.index.date[-1]
+        df_today = df[df.index.date == today_date].copy()
+        df_prev = df[df.index.date < today_date].copy()
         
-        # ORB Levels
-        df["Time"] = df.index.time
-        cutoff = (datetime.combine(datetime.today(), dtime(9, 15)) + pd.Timedelta(minutes=orb_minutes)).time()
-        orb_df = df[df["Time"] <= cutoff]
+        if df_today.empty: return None
+
+        # Institutional Volume Metric (Today's Total Vol vs Prev Day Total Vol)
+        vol_ratio = df_today['Volume'].sum() / (df_prev['Volume'].sum() + 1)
         
-        if orb_df.empty: return None
+        # ORB Calculation
+        df_today["Time"] = df_today.index.time
+        cutoff = (datetime.combine(datetime.today(), dtime(9, 15)) + timedelta(minutes=orb_mins)).time()
+        orb_range = df_today[df_today["Time"] <= cutoff]
         
-        high, low = orb_df["High"].max(), orb_df["Low"].min()
-        last = df["Close"].iloc[-1]
-        vol_now = df["Volume"].iloc[-1]
+        if orb_range.empty: return None
         
-        # Signal Logic
-        if last > high and vol_now > df["Vol_Avg"].iloc[-1]:
-            return {"Symbol": symbol, "Signal": "BUY", "Price": round(last, 2), "Level": round(high, 2)}
-        elif last < low and vol_now > df["Vol_Avg"].iloc[-1]:
-            return {"Symbol": symbol, "Signal": "SELL", "Price": round(last, 2), "Level": round(low, 2)}
+        high, low = orb_range["High"].max(), orb_range["Low"].min()
+        last = df_today["Close"].iloc[-1]
+        
+        # Signal Result
+        res = {
+            "Symbol": symbol,
+            "Price": round(last, 2),
+            "Vol_Shock": round(vol_ratio, 2),
+            "Signal": "Neutral",
+            "Level": 0.0
+        }
+
+        if last > high:
+            res.update({"Signal": "BUY", "Level": round(high, 2)})
+        elif last < low:
+            res.update({"Signal": "SELL", "Level": round(low, 2)})
             
-        return None
+        return res
     except:
         return None
 
 # ================================
-# MAIN DASHBOARD
+# SIDEBAR & INPUTS
+# ================================
+all_symbols = get_mega_universe()
+
+with st.sidebar:
+    st.header("⚡ Institutional Controls")
+    orb_minutes = st.number_input("ORB Timeframe", 5, 60, 15)
+    min_vol_ratio = st.slider("Min Vol Shock (vs Prev Day)", 0.5, 5.0, 1.5)
+    max_threads = st.slider("Threads", 20, 150, 100)
+    
+    st.divider()
+    st.subheader("📊 Top 100 Volume Gainers")
+    vol_placeholder = st.empty()
+
+# ================================
+# EXECUTION LOGIC
 # ================================
 m1, m2, m3 = st.columns(3)
 p_bar_text = m1.empty()
 scan_metric = m2.empty()
 signal_metric = m3.empty()
-
 progress_bar = st.progress(0)
-start_button = st.button(f"🔥 Start Mega-Scan ({len(all_symbols)} Shares)")
 
-if "signals" not in st.session_state: st.session_state.signals = []
+start_button = st.button(f"🔥 Run Deep Scan ({len(all_symbols)} Stocks)")
 
 if start_button or market_open:
-    current_cycle_signals = []
+    all_results = []
     scanned_count = 0
     total = len(all_symbols)
 
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_map = {executor.submit(scan_stock, s): s for s in all_symbols}
+    with ThreadPoolExecutor(max_workers=max_threads) as executor:
+        futures = {executor.submit(scan_stock, s, orb_minutes): s for s in all_symbols}
         
-        for future in as_completed(future_map):
+        for future in as_completed(futures):
             scanned_count += 1
             res = future.result()
             if res:
-                current_cycle_signals.append(res)
+                all_results.append(res)
             
-            # Optimized UI updates (every 20 stocks for speed)
-            if scanned_count % 20 == 0 or scanned_count == total:
+            if scanned_count % 25 == 0 or scanned_count == total:
                 progress_bar.progress(scanned_count / total)
-                p_bar_text.text(f"Scanning: {future_map[future]}")
-                scan_metric.metric("Total Scanned", f"{scanned_count} / {total}")
-                signal_metric.metric("Breakouts", len(current_cycle_signals))
-    
-    st.session_state.signals = current_cycle_signals
+                p_bar_text.text(f"Processing: {futures[future]}")
+                scan_metric.metric("Total Scanned", f"{scanned_count}/{total}")
+                
+    if all_results:
+        full_df = pd.DataFrame(all_results)
+        
+        # 1. Update Sidebar with Volume Gainers
+        top_vol = full_df.sort_values(by="Vol_Shock", ascending=False).head(100)
+        vol_placeholder.dataframe(top_vol[["Symbol", "Vol_Shock"]], height=400)
+        
+        # 2. Filter for ORB Qualified Signals (Breakout + High Vol)
+        qualified = full_df[
+            (full_df["Signal"] != "Neutral") & 
+            (full_df["Vol_Shock"] >= min_vol_ratio)
+        ]
+        
+        signal_metric.metric("High-Conviction Signals", len(qualified))
+        
+        st.divider()
+        st.subheader("🎯 Qualified Breakouts (Institutional Footprint Found)")
+        if not qualified.empty:
+            st.dataframe(qualified.sort_values(by="Vol_Shock", ascending=False), use_container_width=True)
+        else:
+            st.info("Scanning complete. No stocks met both ORB and Volume Shock criteria yet.")
+            
+        # 3. Analytics Chart
+        st.subheader("📈 Volatility vs Volume Shock")
+        fig = go.Figure(data=go.Scatter(
+            x=full_df["Vol_Shock"], 
+            y=full_df["Price"], 
+            mode='markers',
+            marker=dict(size=8, color=full_df["Vol_Shock"], colorscale='Viridis', showscale=True),
+            text=full_df["Symbol"]
+        ))
+        fig.update_layout(xaxis_title="Volume Shock Ratio", yaxis_title="Price")
+        st.plotly_chart(fig, use_container_width=True)
 
-# ================================
-# DISPLAY RESULTS
-# ================================
-st.divider()
-if st.session_state.signals:
-    st.subheader(f"✅ Active Signals ({len(st.session_state.signals)})")
-    res_df = pd.DataFrame(st.session_state.signals)
-    st.dataframe(res_df, use_container_width=True)
-else:
-    st.info("No active breakouts found in the current market universe.")
-
-st.caption(f"Engine Heartbeat: {datetime.now().strftime('%H:%M:%S')} | Environment: Multi-Threaded NSE-Total")
+st.caption(f"Last Heartbeat: {datetime.now().strftime('%H:%M:%S')} | Total Universe: {len(all_symbols)}")
