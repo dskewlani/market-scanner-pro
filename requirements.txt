@@ -5,3 +5,9 @@ streamlit
 yfinance
 pandas
 streamlit-autorefresh
+streamlit
+yfinance
+pandas
+requests
+plotly
+streamlit-autorefresh
