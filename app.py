@@ -1,9 +1,8 @@
 # ================================
-# ORB SMART SCANNER — FULL ENHANCED REWRITE
-# All features: MTF, RSI/MACD, Supertrend, Partial Profit,
-# Nifty Filter, VIX Sizing, Gap Detection, Sector Heatmap,
-# Backtester, Trade Journal, Perf Stats, Signal Scoring,
-# Telegram Alerts, Sound Alert, Daily P&L Limits, Watchlist Persistence
+# ORB SMART SCANNER — FULL ENHANCED REWRITE v2
+# FIX: Robust yfinance fetching — handles MultiIndex, empty data,
+#      insufficient bars, market-closed fallback to 5d period,
+#      column name normalisation, and timezone-aware indexing.
 # ================================
 
 import streamlit as st
@@ -165,7 +164,7 @@ PRESETS = {
     "IT Sector": [
         "TCS.NS","INFOSYS.NS","WIPRO.NS","HCLTECH.NS","TECHM.NS",
         "MPHASIS.NS","LTTS.NS","PERSISTENT.NS","COFORGE.NS","OFSS.NS",
-        "KPITTECH.NS","SONATSOFTW.NS","MASTEK.NS","HEXAWARE.NS","BIRLASOFT.NS",
+        "KPITTECH.NS","SONATSOFTW.NS","MASTEK.NS","BIRLASOFT.NS",
     ],
     "Pharma Sector": [
         "SUNPHARMA.NS","DRREDDY.NS","CIPLA.NS","DIVISLAB.NS","LUPIN.NS",
@@ -237,7 +236,7 @@ def init_state():
         "nifty_trend": None,
         "vix_value": None,
         "backtest_results": None,
-        "trade_notes": {},       # symbol+entry_time -> note
+        "trade_notes": {},
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -309,7 +308,6 @@ with st.sidebar:
     else:
         selected_symbols = []
 
-    # Save watchlist on change
     if selected_symbols != saved_watchlist.get(preset_choice, []):
         saved_watchlist[preset_choice] = selected_symbols
         save_watchlist(saved_watchlist)
@@ -327,12 +325,12 @@ with st.sidebar:
 
     st.divider()
     st.markdown("### 📐 Strategy Parameters")
-    orb_minutes   = st.number_input("ORB Minutes", 5, 60, 15)
-    ema_period    = st.number_input("EMA Period (5m)", 5, 100, 20)
-    ema_15m_period= st.number_input("EMA Period (15m MTF)", 5, 100, 20)
-    atr_period    = st.number_input("ATR Period", 5, 30, 14)
-    rsi_period    = st.number_input("RSI Period", 5, 30, 14)
-    st_atr_mult   = st.slider("Supertrend ATR Multiplier", 1.0, 5.0, 3.0, 0.5)
+    orb_minutes    = st.number_input("ORB Minutes", 5, 60, 15)
+    ema_period     = st.number_input("EMA Period (5m)", 5, 100, 20)
+    ema_15m_period = st.number_input("EMA Period (15m MTF)", 5, 100, 20)
+    atr_period     = st.number_input("ATR Period", 5, 30, 14)
+    rsi_period     = st.number_input("RSI Period", 5, 30, 14)
+    st_atr_mult    = st.slider("Supertrend ATR Multiplier", 1.0, 5.0, 3.0, 0.5)
 
     st.divider()
     st.markdown("### 💰 Risk Management")
@@ -348,30 +346,30 @@ with st.sidebar:
         st.session_state.lock_reason = ""
         st.rerun()
 
-    risk_pct        = st.slider("Risk per Trade (%)", 0.5, 3.0, 1.0, 0.1)
-    max_trades      = st.number_input("Max Concurrent Trades", 1, 30, 5)
-    max_risk_pct    = st.slider("Max Portfolio Risk (%)", 1.0, 10.0, 5.0, 0.5)
+    risk_pct      = st.slider("Risk per Trade (%)", 0.5, 3.0, 1.0, 0.1)
+    max_trades    = st.number_input("Max Concurrent Trades", 1, 30, 5)
+    max_risk_pct  = st.slider("Max Portfolio Risk (%)", 1.0, 10.0, 5.0, 0.5)
 
     st.divider()
     st.markdown("### 📅 Daily P&L Limits")
-    daily_loss_limit_pct   = st.slider("Daily Loss Limit (%)", 0.5, 10.0, 3.0, 0.5)
-    daily_profit_target_pct= st.slider("Daily Profit Target (%)", 1.0, 20.0, 5.0, 0.5)
+    daily_loss_limit_pct    = st.slider("Daily Loss Limit (%)", 0.5, 10.0, 3.0, 0.5)
+    daily_profit_target_pct = st.slider("Daily Profit Target (%)", 1.0, 20.0, 5.0, 0.5)
 
     st.divider()
     st.markdown("### 🔍 Signal Filters")
-    min_vol_ratio   = st.slider("Min Volume Ratio", 1.0, 5.0, 1.8, 0.1)
-    min_body_pct    = st.slider("Min Candle Body %", 0.3, 0.9, 0.6, 0.05)
-    min_ema_dist    = st.slider("Min EMA Distance %", 0.1, 2.0, 0.5, 0.1) / 100
-    max_ema_dist    = st.slider("Max EMA Distance %", 0.5, 5.0, 2.0, 0.1) / 100
-    min_atr_ratio   = st.slider("Min ATR Ratio %", 0.1, 1.0, 0.3, 0.05) / 100
-    rsi_buy_min     = st.slider("RSI Min for BUY", 40, 70, 55)
-    rsi_sell_max    = st.slider("RSI Max for SELL", 30, 60, 45)
-    use_mtf         = st.checkbox("MTF Confirmation (15m EMA)", True)
-    use_macd        = st.checkbox("MACD Filter", True)
-    use_nifty_filter= st.checkbox("Nifty Index Filter", True)
-    use_vix_sizing  = st.checkbox("VIX-Based Position Sizing", True)
-    use_gap_detect  = st.checkbox("Gap Detection", True)
-    gap_pct         = st.slider("Gap Threshold (%)", 0.5, 3.0, 1.0, 0.1) / 100
+    min_vol_ratio  = st.slider("Min Volume Ratio", 1.0, 5.0, 1.8, 0.1)
+    min_body_pct   = st.slider("Min Candle Body %", 0.3, 0.9, 0.6, 0.05)
+    min_ema_dist   = st.slider("Min EMA Distance %", 0.1, 2.0, 0.5, 0.1) / 100
+    max_ema_dist   = st.slider("Max EMA Distance %", 0.5, 5.0, 2.0, 0.1) / 100
+    min_atr_ratio  = st.slider("Min ATR Ratio %", 0.1, 1.0, 0.3, 0.05) / 100
+    rsi_buy_min    = st.slider("RSI Min for BUY", 40, 70, 55)
+    rsi_sell_max   = st.slider("RSI Max for SELL", 30, 60, 45)
+    use_mtf        = st.checkbox("MTF Confirmation (15m EMA)", True)
+    use_macd       = st.checkbox("MACD Filter", True)
+    use_nifty_filter = st.checkbox("Nifty Index Filter", True)
+    use_vix_sizing = st.checkbox("VIX-Based Position Sizing", True)
+    use_gap_detect = st.checkbox("Gap Detection", True)
+    gap_pct        = st.slider("Gap Threshold (%)", 0.5, 3.0, 1.0, 0.1) / 100
 
     st.divider()
     st.markdown("### 🛡️ Stop Loss")
@@ -381,13 +379,13 @@ with st.sidebar:
 
     st.divider()
     st.markdown("### 📦 Partial Profit")
-    use_partial     = st.checkbox("Partial Profit Booking (50% @ 1×ATR)", True)
+    use_partial = st.checkbox("Partial Profit Booking (50% @ 1×ATR)", True)
 
     st.divider()
     st.markdown("### 📡 Telegram Alerts")
-    tg_token        = st.text_input("Bot Token", type="password", placeholder="5XXXXXX:AAF...")
-    tg_chat_id      = st.text_input("Chat ID", placeholder="-100XXXXXXXXXX")
-    send_tg         = st.checkbox("Enable Telegram", False)
+    tg_token   = st.text_input("Bot Token", type="password", placeholder="5XXXXXX:AAF...")
+    tg_chat_id = st.text_input("Chat ID", placeholder="-100XXXXXXXXXX")
+    send_tg    = st.checkbox("Enable Telegram", False)
 
     st.divider()
     show_errors = st.checkbox("Show fetch errors", False)
@@ -447,7 +445,103 @@ if st.session_state.trading_locked:
         st.markdown(f'<div class="daily-limit-banner">🛑 TRADING LOCKED — {st.session_state.lock_reason}. Click "Unlock Trading" to override.</div>', unsafe_allow_html=True)
 
 if not market_open:
-    st.warning("⏸ Market is closed. Auto-scan paused. Use **Scan Now** for manual scan on historical intraday data.")
+    st.info("⏸ Market is closed. Fetching last 5 days of intraday data for analysis. Use **Scan Now** to run manually.")
+
+# ================================
+# *** CORE FIX: ROBUST FETCH FUNCTION ***
+# ================================
+def _flatten_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Robustly flatten MultiIndex columns produced by yfinance.
+    Works for both single-ticker and multi-ticker downloads.
+    """
+    if df is None or df.empty:
+        return df
+    if isinstance(df.columns, pd.MultiIndex):
+        # If second level is all empty strings or all same ticker → use first level
+        lvl1 = df.columns.get_level_values(1).unique().tolist()
+        if len(lvl1) <= 1:
+            df.columns = df.columns.get_level_values(0)
+        else:
+            # Multi-ticker download: pick first ticker's data
+            ticker_col = lvl1[0]
+            df = df.xs(ticker_col, axis=1, level=1)
+    # Normalise column names to Title Case
+    df.columns = [str(c).strip().title() for c in df.columns]
+    # Rename common variants
+    rename_map = {
+        "Adj Close": "Close", "Adj_Close": "Close",
+        "Adjclose": "Close", "Adj close": "Close",
+    }
+    df.rename(columns=rename_map, inplace=True)
+    return df
+
+
+def fetch(symbol: str, interval: str = "5m", period: str = "5d") -> tuple:
+    """
+    Fetch OHLCV data with multiple fallback strategies.
+    Returns (symbol, df, error_string_or_None)
+    """
+    required_cols = {"Open", "High", "Low", "Close", "Volume"}
+    min_bars = 10   # reduced minimum — indicator code handles NaNs internally
+
+    # Strategy list: try progressively broader periods
+    strategies = [
+        {"interval": interval, "period": period},
+        {"interval": interval, "period": "5d"},
+        {"interval": interval, "period": "1mo"},
+    ]
+    # For daily data no need for fallbacks
+    if interval == "1d":
+        strategies = [{"interval": "1d", "period": "5d"}]
+
+    last_err = "Unknown error"
+    for strat in strategies:
+        try:
+            raw = yf.download(
+                symbol,
+                interval=strat["interval"],
+                period=strat["period"],
+                progress=False,
+                auto_adjust=True,
+                actions=False,
+            )
+            if raw is None or raw.empty:
+                last_err = f"Empty response (interval={strat['interval']}, period={strat['period']})"
+                continue
+
+            df = _flatten_columns(raw.copy())
+
+            # Verify required columns exist
+            missing = required_cols - set(df.columns)
+            if missing:
+                last_err = f"Missing columns: {missing}"
+                continue
+
+            # Drop rows where all OHLC are NaN
+            df.dropna(subset=["Open", "High", "Low", "Close"], how="all", inplace=True)
+
+            if len(df) < min_bars:
+                last_err = f"Too few bars after cleaning: {len(df)} (need {min_bars})"
+                continue
+
+            # Ensure index is DatetimeIndex
+            if not isinstance(df.index, pd.DatetimeIndex):
+                df.index = pd.to_datetime(df.index)
+
+            # Remove timezone if present (simplifies time comparisons)
+            if df.index.tz is not None:
+                df.index = df.index.tz_convert("Asia/Kolkata").tz_localize(None)
+
+            df.sort_index(inplace=True)
+            return symbol, df, None
+
+        except Exception as e:
+            last_err = f"{type(e).__name__}: {str(e)[:120]}"
+            continue
+
+    return symbol, None, last_err
+
 
 # ================================
 # MARKET CONTEXT FETCH (Nifty + VIX)
@@ -456,19 +550,15 @@ if not market_open:
 def fetch_nifty_vix():
     result = {"nifty_change": 0.0, "nifty_price": 0.0, "vix": 0.0}
     try:
-        nifty = yf.download("^NSEI", period="2d", interval="1d", progress=False, auto_adjust=True)
-        if isinstance(nifty.columns, pd.MultiIndex):
-            nifty.columns = nifty.columns.get_level_values(0)
-        if len(nifty) >= 2:
+        _, nifty, _ = fetch("^NSEI", interval="1d", period="5d")
+        if nifty is not None and len(nifty) >= 2:
             result["nifty_price"]  = float(nifty["Close"].iloc[-1])
             result["nifty_change"] = float(nifty["Close"].iloc[-1] - nifty["Close"].iloc[-2])
     except Exception:
         pass
     try:
-        vix = yf.download("^INDIAVIX", period="1d", interval="1d", progress=False, auto_adjust=True)
-        if isinstance(vix.columns, pd.MultiIndex):
-            vix.columns = vix.columns.get_level_values(0)
-        if not vix.empty:
+        _, vix, _ = fetch("^INDIAVIX", interval="1d", period="5d")
+        if vix is not None and not vix.empty:
             result["vix"] = float(vix["Close"].iloc[-1])
     except Exception:
         pass
@@ -479,219 +569,280 @@ st.session_state.nifty_trend = mkt_ctx["nifty_change"]
 st.session_state.vix_value   = mkt_ctx["vix"]
 
 # ================================
-# FETCH FUNCTION
-# ================================
-def fetch(symbol, interval="5m", period="1d"):
-    try:
-        df = yf.download(symbol, interval=interval, period=period, progress=False, auto_adjust=True)
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
-        df.dropna(inplace=True)
-        if df.empty:
-            return symbol, None, "Empty data"
-        return symbol, df, None
-    except Exception as e:
-        return symbol, None, str(e)
-
-# ================================
 # INDICATORS
 # ================================
-def add_indicators(df):
+def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
+    close = df["Close"]
+    high  = df["High"]
+    low   = df["Low"]
+    vol   = df["Volume"]
+
     # EMA
-    df["EMA"] = df["Close"].ewm(span=ema_period, adjust=False).mean()
-    # ATR
-    df["H_L"]  = df["High"] - df["Low"]
-    df["H_PC"] = abs(df["High"] - df["Close"].shift(1))
-    df["L_PC"] = abs(df["Low"]  - df["Close"].shift(1))
-    df["TR"]   = df[["H_L","H_PC","L_PC"]].max(axis=1)
-    df["ATR"]  = df["TR"].rolling(atr_period).mean()
-    # Volume
-    df["Vol_Avg"] = df["Volume"].rolling(20).mean()
-    # Body
-    body          = abs(df["Close"] - df["Open"])
-    rng           = (df["High"] - df["Low"]).replace(0, 1e-9)
-    df["BodyPct"] = body / rng
+    df["EMA"] = close.ewm(span=ema_period, adjust=False).mean()
+
+    # ATR (True Range)
+    prev_close = close.shift(1)
+    df["TR"]   = pd.concat([
+        high - low,
+        (high - prev_close).abs(),
+        (low  - prev_close).abs(),
+    ], axis=1).max(axis=1)
+    df["ATR"]  = df["TR"].rolling(atr_period, min_periods=1).mean()
+
+    # Volume ratio
+    df["Vol_Avg"] = vol.rolling(20, min_periods=5).mean()
+
+    # Candle body %
+    body          = (close - df["Open"]).abs()
+    rng           = (high - low).replace(0, np.nan).fillna(1e-9)
+    df["BodyPct"] = (body / rng).clip(0, 1)
+
     # RSI
-    delta = df["Close"].diff()
+    delta = close.diff()
     gain  = delta.clip(lower=0)
     loss  = (-delta).clip(lower=0)
     avg_g = gain.ewm(com=rsi_period - 1, adjust=False).mean()
     avg_l = loss.ewm(com=rsi_period - 1, adjust=False).mean()
-    rs    = avg_g / avg_l.replace(0, 1e-9)
+    rs    = avg_g / avg_l.replace(0, np.nan).fillna(1e-9)
     df["RSI"] = 100 - (100 / (1 + rs))
+
     # MACD
-    ema12 = df["Close"].ewm(span=12, adjust=False).mean()
-    ema26 = df["Close"].ewm(span=26, adjust=False).mean()
-    df["MACD"]      = ema12 - ema26
-    df["MACD_sig"]  = df["MACD"].ewm(span=9, adjust=False).mean()
-    df["MACD_hist"] = df["MACD"] - df["MACD_sig"]
+    ema12         = close.ewm(span=12, adjust=False).mean()
+    ema26         = close.ewm(span=26, adjust=False).mean()
+    df["MACD"]     = ema12 - ema26
+    df["MACD_sig"] = df["MACD"].ewm(span=9, adjust=False).mean()
+    df["MACD_hist"]= df["MACD"] - df["MACD_sig"]
+
     # Supertrend
-    hl2 = (df["High"] + df["Low"]) / 2
-    df["ST_upper"] = hl2 + st_atr_mult * df["ATR"]
-    df["ST_lower"] = hl2 - st_atr_mult * df["ATR"]
-    st_dir   = [1] * len(df)
-    st_val   = [0.0] * len(df)
+    hl2 = (high + low) / 2
+    atr  = df["ATR"]
+    upper_band = hl2 + st_atr_mult * atr
+    lower_band = hl2 - st_atr_mult * atr
+
+    st_dir = np.ones(len(df), dtype=int)
+    st_val = np.zeros(len(df))
+    ub     = upper_band.values.copy()
+    lb     = lower_band.values.copy()
+    cl     = close.values
+
     for i in range(1, len(df)):
-        close = float(df["Close"].iloc[i])
-        prev_close = float(df["Close"].iloc[i-1])
-        prev_dir   = st_dir[i-1]
-        prev_upper = float(df["ST_upper"].iloc[i-1])
-        prev_lower = float(df["ST_lower"].iloc[i-1])
-        curr_upper = float(df["ST_upper"].iloc[i])
-        curr_lower = float(df["ST_lower"].iloc[i])
+        # Finalise bands
+        if cl[i - 1] <= ub[i - 1]:
+            ub[i] = min(ub[i], ub[i - 1])
+        if cl[i - 1] >= lb[i - 1]:
+            lb[i] = max(lb[i], lb[i - 1])
 
-        curr_upper = min(curr_upper, prev_upper) if prev_close <= prev_upper else curr_upper
-        curr_lower = max(curr_lower, prev_lower) if prev_close >= prev_lower else curr_lower
-        df.at[df.index[i], "ST_upper"] = curr_upper
-        df.at[df.index[i], "ST_lower"] = curr_lower
-
-        if prev_dir == -1 and close > curr_upper:
+        if st_dir[i - 1] == -1 and cl[i] > ub[i]:
             st_dir[i] = 1
-        elif prev_dir == 1 and close < curr_lower:
+        elif st_dir[i - 1] == 1 and cl[i] < lb[i]:
             st_dir[i] = -1
         else:
-            st_dir[i] = prev_dir
+            st_dir[i] = st_dir[i - 1]
 
-        st_val[i] = curr_lower if st_dir[i] == 1 else curr_upper
+        st_val[i] = lb[i] if st_dir[i] == 1 else ub[i]
 
-    df["ST_dir"] = st_dir
-    df["ST_val"] = st_val
+    df["ST_upper"] = ub
+    df["ST_lower"] = lb
+    df["ST_dir"]   = st_dir
+    df["ST_val"]   = st_val
     return df
 
-def add_indicators_15m(df):
+
+def add_indicators_15m(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df["EMA15"] = df["Close"].ewm(span=ema_15m_period, adjust=False).mean()
     return df
+
 
 # ================================
 # SIGNAL FILTERS
 # ================================
 def breakout_confirmed(df, level, direction):
-    last, prev = float(df["Close"].iloc[-1]), float(df["Close"].iloc[-2])
-    return (prev > level and last > level) if direction == "BUY" else (prev < level and last < level)
+    if len(df) < 2:
+        return False
+    last = float(df["Close"].iloc[-1])
+    prev = float(df["Close"].iloc[-2])
+    if direction == "BUY":
+        return prev > level and last > level
+    return prev < level and last < level
+
 
 def check_rsi(df, direction):
-    rsi = float(df["RSI"].iloc[-1])
+    rsi = df["RSI"].iloc[-1]
     if pd.isna(rsi):
-        return True, rsi
+        return True, 50.0
+    rsi = float(rsi)
     if direction == "BUY":
         return rsi > rsi_buy_min, round(rsi, 1)
-    else:
-        return rsi < rsi_sell_max, round(rsi, 1)
+    return rsi < rsi_sell_max, round(rsi, 1)
+
 
 def check_macd(df, direction):
-    hist = float(df["MACD_hist"].iloc[-1])
+    hist = df["MACD_hist"].iloc[-1]
     if pd.isna(hist):
         return True
-    return hist > 0 if direction == "BUY" else hist < 0
+    return float(hist) > 0 if direction == "BUY" else float(hist) < 0
+
 
 def check_volume(df):
-    vol, vol_avg = float(df["Volume"].iloc[-1]), float(df["Vol_Avg"].iloc[-1])
-    if vol_avg == 0:
-        return False, 0
-    ratio = vol / vol_avg
+    vol     = float(df["Volume"].iloc[-1])
+    vol_avg = df["Vol_Avg"].iloc[-1]
+    if pd.isna(vol_avg) or vol_avg == 0:
+        return False, 0.0
+    ratio = vol / float(vol_avg)
     return ratio >= min_vol_ratio, round(ratio, 2)
 
+
 def check_ema_dist(df):
-    price, ema = float(df["Close"].iloc[-1]), float(df["EMA"].iloc[-1])
+    price = float(df["Close"].iloc[-1])
+    ema   = float(df["EMA"].iloc[-1])
+    if ema == 0 or pd.isna(ema):
+        return False
     dist = abs(price - ema) / ema
     return min_ema_dist <= dist <= max_ema_dist
 
+
 def check_atr(df):
-    atr, close = float(df["ATR"].iloc[-1]), float(df["Close"].iloc[-1])
-    return (atr / close) > min_atr_ratio
+    atr   = df["ATR"].iloc[-1]
+    close = df["Close"].iloc[-1]
+    if pd.isna(atr) or pd.isna(close) or float(close) == 0:
+        return False
+    return (float(atr) / float(close)) > min_atr_ratio
+
 
 def check_supertrend(df, direction):
     st_d = int(df["ST_dir"].iloc[-1])
     return (st_d == 1 and direction == "BUY") or (st_d == -1 and direction == "SELL")
 
-def check_gap(df_daily_or_5m):
-    """Return gap % vs previous close (positive = gap up, negative = gap down)."""
-    if len(df_daily_or_5m) < 2:
-        return 0.0
+
+def check_gap(df_5m):
+    """Return gap % vs previous day's close using first bar of today."""
     try:
-        today_open = float(df_daily_or_5m["Open"].iloc[0])
-        prev_close = float(df_daily_or_5m["Close"].iloc[-2]) if len(df_daily_or_5m) > 1 else today_open
-        return (today_open - prev_close) / prev_close
+        df_5m = df_5m.copy()
+        df_5m.index = pd.to_datetime(df_5m.index)
+        dates = df_5m.index.normalize().unique()
+        if len(dates) < 2:
+            return 0.0
+        today     = dates[-1]
+        yesterday = dates[-2]
+        today_open  = float(df_5m[df_5m.index.normalize() == today]["Open"].iloc[0])
+        yest_close  = float(df_5m[df_5m.index.normalize() == yesterday]["Close"].iloc[-1])
+        if yest_close == 0:
+            return 0.0
+        return (today_open - yest_close) / yest_close
     except Exception:
         return 0.0
+
 
 def signal_score(vol_ratio, atr_ratio, body_pct, rsi_val, direction):
     """Score 1–5 based on filter quality."""
     score = 0
-    # Volume
-    if vol_ratio >= 3.0: score += 1
-    elif vol_ratio >= 2.0: score += 0.7
-    elif vol_ratio >= min_vol_ratio: score += 0.4
-    # ATR
-    if atr_ratio >= min_atr_ratio * 2: score += 1
-    elif atr_ratio >= min_atr_ratio: score += 0.6
-    # Body
-    if body_pct >= 0.8: score += 1
-    elif body_pct >= 0.65: score += 0.7
-    elif body_pct >= min_body_pct: score += 0.4
-    # RSI
+    if vol_ratio >= 3.0:
+        score += 1
+    elif vol_ratio >= 2.0:
+        score += 0.7
+    elif vol_ratio >= min_vol_ratio:
+        score += 0.4
+    if atr_ratio >= min_atr_ratio * 2:
+        score += 1
+    elif atr_ratio >= min_atr_ratio:
+        score += 0.6
+    if body_pct >= 0.8:
+        score += 1
+    elif body_pct >= 0.65:
+        score += 0.7
+    elif body_pct >= min_body_pct:
+        score += 0.4
     if direction == "BUY":
-        if rsi_val >= 65: score += 1
-        elif rsi_val >= 55: score += 0.7
-        else: score += 0.3
+        if rsi_val >= 65:
+            score += 1
+        elif rsi_val >= 55:
+            score += 0.7
+        else:
+            score += 0.3
     else:
-        if rsi_val <= 35: score += 1
-        elif rsi_val <= 45: score += 0.7
-        else: score += 0.3
-    # Max = 4 points above, normalise to 5
+        if rsi_val <= 35:
+            score += 1
+        elif rsi_val <= 45:
+            score += 0.7
+        else:
+            score += 0.3
     return round(min(score / 4 * 5, 5), 1)
 
+
 # ================================
-# SIGNAL GENERATOR (Enhanced)
+# SIGNAL GENERATOR
 # ================================
-def get_signal(df_5m, df_15m=None):
-    df = add_indicators(df_5m)
+def get_orb_range(df: pd.DataFrame):
+    """Extract ORB high/low from the most recent trading day."""
     df = df.copy()
     df.index = pd.to_datetime(df.index)
-    df["_time"] = df.index.time
+    # Get most recent date
+    last_date = df.index.normalize().max()
+    day_df    = df[df.index.normalize() == last_date].copy()
+    day_df["_time"] = day_df.index.time
 
-    cutoff = (
-        pd.Timestamp.combine(pd.Timestamp.today().date(), dtime(9, 15))
-        + pd.Timedelta(minutes=int(orb_minutes))
+    market_start = dtime(9, 15)
+    orb_end_time = (
+        datetime.combine(last_date.date(), market_start)
+        + timedelta(minutes=int(orb_minutes))
     ).time()
 
-    orb_df = df[df["_time"] <= cutoff]
-    if len(orb_df) < 3:
-        return None, "Insufficient ORB data"
+    orb_df = day_df[day_df["_time"] <= orb_end_time]
+    return orb_df, day_df
+
+
+def get_signal(df_5m: pd.DataFrame, df_15m=None):
+    if df_5m is None or len(df_5m) < 10:
+        return None, "Insufficient 5m data"
+
+    df = add_indicators(df_5m)
+    df.index = pd.to_datetime(df.index)
+
+    orb_df, day_df = get_orb_range(df)
+
+    if len(orb_df) < 2:
+        # Fallback: use first N bars of full dataset as ORB
+        orb_df  = df.iloc[:max(2, int(orb_minutes // 5))]
+        day_df  = df
 
     orb_high = float(orb_df["High"].max())
     orb_low  = float(orb_df["Low"].min())
     last     = float(df["Close"].iloc[-1])
-    atr      = float(df["ATR"].iloc[-1]) if not pd.isna(df["ATR"].iloc[-1]) else 0
+    atr      = float(df["ATR"].iloc[-1]) if not pd.isna(df["ATR"].iloc[-1]) else 0.0
+
+    if orb_high == orb_low:
+        return None, "ORB range is zero"
 
     if last > orb_high:
         direction, level = "BUY", orb_high
     elif last < orb_low:
         direction, level = "SELL", orb_low
     else:
-        return None, "Inside ORB range"
+        return None, "Price inside ORB range"
 
     if not breakout_confirmed(df, level, direction):
-        return None, "Breakout not confirmed (2-bar)"
+        return None, "Breakout not confirmed (2-bar rule)"
 
     body_pct = float(df["BodyPct"].iloc[-1])
-    if body_pct < min_body_pct:
+    if pd.isna(body_pct) or body_pct < min_body_pct:
         return None, f"Weak candle body ({body_pct:.2f})"
 
     vol_ok, vol_ratio = check_volume(df)
     if not vol_ok:
-        return None, f"Low volume ({vol_ratio}x)"
+        return None, f"Low volume ratio ({vol_ratio}x < {min_vol_ratio}x)"
 
     if not check_ema_dist(df):
-        return None, "EMA distance out of range"
+        ema_val = float(df["EMA"].iloc[-1])
+        dist_pct = abs(last - ema_val) / ema_val * 100 if ema_val else 0
+        return None, f"EMA distance out of range ({dist_pct:.2f}%)"
 
     if not check_atr(df):
-        return None, "Low ATR (low volatility)"
+        return None, "Low ATR (insufficient volatility)"
 
     rsi_ok, rsi_val = check_rsi(df, direction)
-    if use_macd and not rsi_ok:
+    if not rsi_ok:
         return None, f"RSI filter failed ({rsi_val})"
 
     if use_macd and not check_macd(df, direction):
@@ -705,15 +856,15 @@ def get_signal(df_5m, df_15m=None):
         ema_prev = float(df15["EMA15"].iloc[-2])
         mtf_ema_rising = ema_now > ema_prev
         if direction == "BUY" and not mtf_ema_rising:
-            return None, "15m EMA not rising (MTF fail)"
+            return None, "15m EMA not rising (MTF failed)"
         if direction == "SELL" and mtf_ema_rising:
-            return None, "15m EMA not falling (MTF fail)"
+            return None, "15m EMA not falling (MTF failed)"
 
     # Nifty filter
     if use_nifty_filter:
         nifty_chg = st.session_state.nifty_trend or 0
         if direction == "BUY" and nifty_chg < 0:
-            return None, "Nifty index is red (BUY skipped)"
+            return None, "Nifty is red — BUY skipped"
 
     # Gap detection
     gap = check_gap(df_5m)
@@ -722,37 +873,37 @@ def get_signal(df_5m, df_15m=None):
         gap_flag = "GAP_UP" if gap > 0 else "GAP_DOWN"
 
     # Supertrend SL
-    close = float(df["Close"].iloc[-1])
     if use_supertrend:
-        st_v = float(df["ST_val"].iloc[-1])
-        sl   = st_v
+        sl = float(df["ST_val"].iloc[-1])
     else:
         sl = orb_low if direction == "BUY" else orb_high
 
+    close     = float(df["Close"].iloc[-1])
     atr_ratio = atr / close if close > 0 else 0
-    score = signal_score(vol_ratio, atr_ratio, body_pct, rsi_val if rsi_val else 50, direction)
+    score     = signal_score(vol_ratio, atr_ratio, body_pct, rsi_val, direction)
 
     # VIX sizing factor
-    vix = st.session_state.vix_value or 0
+    vix        = st.session_state.vix_value or 0
     vix_factor = 0.5 if (use_vix_sizing and vix > 20) else 1.0
 
     return {
-        "direction":    direction,
-        "price":        round(last, 2),
-        "orb_high":     round(orb_high, 2),
-        "orb_low":      round(orb_low, 2),
-        "atr":          round(atr, 2),
-        "vol_ratio":    vol_ratio,
-        "ema":          round(float(df["EMA"].iloc[-1]), 2),
-        "rsi":          rsi_val,
-        "macd_hist":    round(float(df["MACD_hist"].iloc[-1]), 4),
-        "sl":           round(sl, 2),
-        "score":        score,
-        "gap":          round(gap * 100, 2),
-        "gap_flag":     gap_flag,
-        "vix_factor":   vix_factor,
-        "mtf_confirmed":mtf_ema_rising,
+        "direction":     direction,
+        "price":         round(last, 2),
+        "orb_high":      round(orb_high, 2),
+        "orb_low":       round(orb_low, 2),
+        "atr":           round(atr, 2),
+        "vol_ratio":     vol_ratio,
+        "ema":           round(float(df["EMA"].iloc[-1]), 2),
+        "rsi":           rsi_val,
+        "macd_hist":     round(float(df["MACD_hist"].iloc[-1]), 4),
+        "sl":            round(sl, 2),
+        "score":         score,
+        "gap":           round(gap * 100, 2),
+        "gap_flag":      gap_flag,
+        "vix_factor":    vix_factor,
+        "mtf_confirmed": mtf_ema_rising,
     }, None
+
 
 # ================================
 # POSITION SIZING
@@ -764,8 +915,13 @@ def calculate_qty(entry, sl, vix_factor=1.0):
         return 0
     return max(1, int(risk_amount / risk_per_share))
 
+
 def total_risk_deployed():
-    return sum(abs(t["entry"] - t["sl"]) * t["qty"] for t in st.session_state.active_trades.values())
+    return sum(
+        abs(t["entry"] - t["sl"]) * t["qty"]
+        for t in st.session_state.active_trades.values()
+    )
+
 
 # ================================
 # TRADE MANAGEMENT
@@ -779,35 +935,35 @@ def enter_trade(symbol, signal):
     atr        = signal["atr"]
     vix_factor = signal.get("vix_factor", 1.0)
 
-    tgt        = price + (2 * atr) if direction == "BUY" else price - (2 * atr)
-    tgt_partial= price + (1 * atr) if direction == "BUY" else price - (1 * atr)
-    qty        = calculate_qty(price, sl, vix_factor)
+    tgt         = price + (2 * atr) if direction == "BUY" else price - (2 * atr)
+    tgt_partial = price + (1 * atr) if direction == "BUY" else price - (1 * atr)
+    qty         = calculate_qty(price, sl, vix_factor)
     if qty == 0:
         return
 
     new_risk = abs(price - sl) * qty
-    if (total_risk_deployed() + new_risk) / st.session_state.capital > (max_risk_pct / 100):
+    if (total_risk_deployed() + new_risk) / max(st.session_state.capital, 1) > (max_risk_pct / 100):
         return
 
     st.session_state.active_trades[symbol] = {
-        "type":          direction,
-        "entry":         price,
-        "sl":            round(sl, 2),
-        "target":        round(tgt, 2),
-        "target_partial":round(tgt_partial, 2),
-        "qty":           qty,
-        "qty_remaining": qty,
-        "partial_done":  False,
-        "breakeven_sl":  False,
-        "entry_time":    datetime.now().strftime("%H:%M:%S"),
-        "atr":           atr,
-        "vol_ratio":     signal["vol_ratio"],
-        "score":         signal.get("score", "—"),
-        "gap_flag":      signal.get("gap_flag", None),
-        "rsi":           signal.get("rsi", "—"),
+        "type":           direction,
+        "entry":          price,
+        "sl":             round(sl, 2),
+        "target":         round(tgt, 2),
+        "target_partial": round(tgt_partial, 2),
+        "qty":            qty,
+        "qty_remaining":  qty,
+        "partial_done":   False,
+        "breakeven_sl":   False,
+        "entry_time":     datetime.now().strftime("%H:%M:%S"),
+        "atr":            atr,
+        "vol_ratio":      signal["vol_ratio"],
+        "score":          signal.get("score", "—"),
+        "gap_flag":       signal.get("gap_flag", None),
+        "rsi":            signal.get("rsi", "—"),
     }
 
-    msg = (
+    send_telegram(
         f"🚀 <b>ORB Signal — {symbol}</b>\n"
         f"Direction: <b>{direction}</b>\n"
         f"Entry: ₹{price} | SL: ₹{sl} | Target: ₹{round(tgt,2)}\n"
@@ -815,7 +971,7 @@ def enter_trade(symbol, signal):
         f"RSI: {signal.get('rsi','—')} | Vol Ratio: {signal['vol_ratio']}x\n"
         f"VIX Factor: {vix_factor}"
     )
-    send_telegram(msg)
+
 
 def manage_trade(symbol, df):
     trade = st.session_state.active_trades[symbol]
@@ -825,35 +981,35 @@ def manage_trade(symbol, df):
     df_ind = add_indicators(df)
     st_val = float(df_ind["ST_val"].iloc[-1]) if "ST_val" in df_ind.columns else None
 
-    # Partial profit booking (50% at 1×ATR)
+    # Partial profit booking
     if use_partial and not trade["partial_done"] and trade["qty_remaining"] > 1:
-        if (direction == "BUY" and price >= trade["target_partial"]) or \
-           (direction == "SELL" and price <= trade["target_partial"]):
+        hit_partial = (direction == "BUY" and price >= trade["target_partial"]) or \
+                      (direction == "SELL" and price <= trade["target_partial"])
+        if hit_partial:
             partial_qty = trade["qty_remaining"] // 2
             if partial_qty > 0:
-                if direction == "BUY":
-                    partial_pnl = (price - trade["entry"]) * partial_qty
-                else:
-                    partial_pnl = (trade["entry"] - price) * partial_qty
+                partial_pnl = (
+                    (price - trade["entry"]) * partial_qty if direction == "BUY"
+                    else (trade["entry"] - price) * partial_qty
+                )
                 trade["qty_remaining"] -= partial_qty
                 trade["partial_done"]   = True
                 trade["breakeven_sl"]   = True
-                trade["sl"]             = trade["entry"]  # move to breakeven
-                st.session_state.capital     += round(partial_pnl, 2)
-                st.session_state.daily_pnl   += round(partial_pnl, 2)
+                trade["sl"]             = trade["entry"]
+                st.session_state.capital    += round(partial_pnl, 2)
+                st.session_state.daily_pnl  += round(partial_pnl, 2)
                 send_telegram(
                     f"📦 <b>Partial Exit — {symbol}</b>\n"
                     f"{partial_qty} qty @ ₹{price:.2f} | P&L: ₹{partial_pnl:+.2f}\n"
                     f"SL moved to breakeven ₹{trade['entry']}"
                 )
 
-    # Update trailing / supertrend SL
+    # Trailing SL update
     if direction == "BUY":
         if use_supertrend and st_val:
             trade["sl"] = max(trade["sl"], round(st_val, 2))
         else:
-            new_sl = price * (1 - trail_buy_pct)
-            trade["sl"] = max(trade["sl"], round(new_sl, 2))
+            trade["sl"] = max(trade["sl"], round(price * (1 - trail_buy_pct), 2))
 
         if price <= trade["sl"]:
             pnl = (price - trade["entry"]) * trade["qty_remaining"]
@@ -865,8 +1021,7 @@ def manage_trade(symbol, df):
         if use_supertrend and st_val:
             trade["sl"] = min(trade["sl"], round(st_val, 2))
         else:
-            new_sl = price * (1 + trail_sell_pct)
-            trade["sl"] = min(trade["sl"], round(new_sl, 2))
+            trade["sl"] = min(trade["sl"], round(price * (1 + trail_sell_pct), 2))
 
         if price >= trade["sl"]:
             pnl = (trade["entry"] - price) * trade["qty_remaining"]
@@ -875,33 +1030,34 @@ def manage_trade(symbol, df):
             pnl = (trade["entry"] - price) * trade["qty_remaining"]
             exit_trade(symbol, price, pnl, "Target Hit")
 
+
 def exit_trade(symbol, price, pnl, reason="Manual"):
     if symbol not in st.session_state.active_trades:
         return
     trade = st.session_state.active_trades.pop(symbol)
-    st.session_state.capital    += round(pnl, 2)
-    st.session_state.daily_pnl  += round(pnl, 2)
+    st.session_state.capital   += round(pnl, 2)
+    st.session_state.daily_pnl += round(pnl, 2)
     entry_val = trade["entry"] * trade.get("qty_remaining", trade["qty"])
-    closed_row = {
+    st.session_state.closed_trades.append({
         "Symbol":     symbol,
         "Type":       trade["type"],
         "Entry":      trade["entry"],
         "Exit":       round(price, 2),
         "Qty":        trade.get("qty_remaining", trade["qty"]),
-        "PnL (₹)":    round(pnl, 2),
+        "PnL (₹)":   round(pnl, 2),
         "PnL %":      round((pnl / entry_val) * 100, 2) if entry_val else 0,
-        "Score":      trade.get("score","—"),
+        "Score":      trade.get("score", "—"),
         "Reason":     reason,
-        "Entry Time": trade.get("entry_time","—"),
+        "Entry Time": trade.get("entry_time", "—"),
         "Exit Time":  datetime.now().strftime("%H:%M:%S"),
         "Note":       "",
-    }
-    st.session_state.closed_trades.append(closed_row)
+    })
     send_telegram(
         f"{'✅' if pnl > 0 else '❌'} <b>Trade Exit — {symbol}</b>\n"
         f"Exit @ ₹{price:.2f} | P&L: ₹{pnl:+.2f}\n"
         f"Reason: {reason}"
     )
+
 
 # ================================
 # MAIN SCAN LOGIC
@@ -913,10 +1069,10 @@ if run_scan and selected_symbols:
     errors        = []
     signals_found = 0
 
-    progress_bar  = st.progress(0, text="Initialising scan...")
-    total         = len(selected_symbols)
+    progress_bar = st.progress(0, text="Initialising scan…")
+    total        = len(selected_symbols)
 
-    BATCH    = 20
+    BATCH     = 20
     all_data  = []
     all_15m   = {}
     done      = 0
@@ -924,7 +1080,7 @@ if run_scan and selected_symbols:
     for i in range(0, total, BATCH):
         batch = selected_symbols[i:i + BATCH]
         with ThreadPoolExecutor(max_workers=min(10, len(batch))) as ex:
-            futures   = {ex.submit(fetch, s, "5m", "1d"): ("5m", s) for s in batch}
+            futures = {ex.submit(fetch, s, "5m", "5d"): ("5m", s) for s in batch}
             if use_mtf:
                 futures.update({ex.submit(fetch, s, "15m", "5d"): ("15m", s) for s in batch})
             for f in as_completed(futures):
@@ -933,7 +1089,7 @@ if run_scan and selected_symbols:
                 if tf == "5m":
                     all_data.append(result)
                     done += 1
-                    progress_bar.progress(done / total, text=f"Fetching 5m... {done}/{total}")
+                    progress_bar.progress(min(done / total, 1.0), text=f"Fetching… {done}/{total}")
                 else:
                     _, df15, _ = result
                     if df15 is not None:
@@ -942,19 +1098,29 @@ if run_scan and selected_symbols:
     progress_bar.empty()
 
     for symbol, df, err in all_data:
-        if err or df is None or len(df) < 30:
-            errors.append({"Symbol": symbol, "Error": err or "Too few bars"})
+        if err or df is None:
+            errors.append({"Symbol": symbol, "Error": err or "No data returned"})
             scan_results.append({
-                "Symbol":"—" + symbol,"Signal":"Error","Score":"—","Price":"—",
-                "ORB High":"—","ORB Low":"—","ATR":"—","Vol Ratio":"—","RSI":"—","Gap %":"—","Reason": err or "Insufficient data"
+                "Symbol":    "⚠️ " + symbol,
+                "Signal":    "Error",
+                "Score":     "—",
+                "Price":     "—",
+                "ORB High":  "—",
+                "ORB Low":   "—",
+                "ATR":       "—",
+                "Vol Ratio": "—",
+                "RSI":       "—",
+                "Gap %":     "—",
+                "Reason":    err or "Fetch failed",
             })
             continue
 
+        # Manage existing active trade
         if symbol in st.session_state.active_trades:
             manage_trade(symbol, df)
             trade = st.session_state.active_trades.get(symbol)
             if trade:
-                price = float(df["Close"].iloc[-1])
+                price  = float(df["Close"].iloc[-1])
                 unreal = (
                     (price - trade["entry"]) * trade["qty_remaining"]
                     if trade["type"] == "BUY"
@@ -963,13 +1129,13 @@ if run_scan and selected_symbols:
                 scan_results.append({
                     "Symbol":    symbol,
                     "Signal":    f"🔵 {trade['type']} (Active)",
-                    "Score":     trade.get("score","—"),
-                    "Price":     round(price,2),
+                    "Score":     trade.get("score", "—"),
+                    "Price":     round(price, 2),
                     "ORB High":  "—",
                     "ORB Low":   "—",
-                    "ATR":       trade.get("atr","—"),
-                    "Vol Ratio": trade.get("vol_ratio","—"),
-                    "RSI":       trade.get("rsi","—"),
+                    "ATR":       trade.get("atr", "—"),
+                    "Vol Ratio": trade.get("vol_ratio", "—"),
+                    "RSI":       trade.get("rsi", "—"),
                     "Gap %":     "—",
                     "Reason":    f"Unrealised ₹{unreal:+,.2f} | SL {trade['sl']}",
                 })
@@ -1011,7 +1177,7 @@ if run_scan and selected_symbols:
                 "ORB Low":   signal["orb_low"],
                 "ATR":       signal["atr"],
                 "Vol Ratio": signal["vol_ratio"],
-                "RSI":       signal.get("rsi","—"),
+                "RSI":       signal.get("rsi", "—"),
                 "Gap %":     gap_str,
                 "Reason":    "Max trades reached",
             })
@@ -1029,7 +1195,7 @@ if run_scan and selected_symbols:
             "ORB Low":   signal["orb_low"],
             "ATR":       signal["atr"],
             "Vol Ratio": signal["vol_ratio"],
-            "RSI":       signal.get("rsi","—"),
+            "RSI":       signal.get("rsi", "—"),
             "Gap %":     gap_str,
             "Reason":    f"Entered @ {signal['price']} | Gap: {gap_str}",
         })
@@ -1043,17 +1209,18 @@ if run_scan and selected_symbols:
         "capital": st.session_state.capital,
     })
 
-    # Sound alert
     if signals_found > st.session_state.last_signal_count:
-        st.components.v1.html(
-            f"<script>checkAndBeep({signals_found});</script>", height=0
-        )
+        st.components.v1.html(f"<script>checkAndBeep({signals_found});</script>", height=0)
     st.session_state.last_signal_count = signals_found
 
     if signals_found > 0:
         st.success(f"✅ **{signals_found} new signal(s)** found across {len(selected_symbols)} symbols")
     else:
-        st.info(f"ℹ️ No new signals. {len(selected_symbols)} symbols scanned.")
+        error_count = len(errors)
+        msg = f"ℹ️ No new signals. {len(selected_symbols)} symbols scanned."
+        if error_count:
+            msg += f" ({error_count} fetch errors — check Error Log tab)"
+        st.info(msg)
 
 elif not selected_symbols:
     st.error("⚠️ No symbols selected. Choose a preset or enter custom tickers in the sidebar.")
@@ -1073,7 +1240,8 @@ else:
     vix_badge = f'<span class="vix-badge-low">VIX {vix_val:.1f} 🟢 LOW</span>'
 
 st.markdown(f"""
-<div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:10px 18px;margin:8px 0;display:flex;gap:24px;align-items:center;font-size:0.9rem;">
+<div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:10px 18px;margin:8px 0;
+            display:flex;gap:24px;align-items:center;font-size:0.9rem;flex-wrap:wrap;">
   <span>🏦 <b>Nifty 50:</b> <span class="{nifty_cls}">{nifty_sym} {abs(nifty_chg):.1f} pts</span></span>
   <span>{vix_badge}</span>
   {'<span style="color:#78350f;font-weight:600;">⚠️ VIX &gt; 20 → Position size halved</span>' if (use_vix_sizing and vix_val > 20) else ''}
@@ -1091,7 +1259,7 @@ win_trades       = [t for t in st.session_state.closed_trades if t["PnL (₹)"] 
 win_rate         = (len(win_trades) / len(st.session_state.closed_trades) * 100) if st.session_state.closed_trades else 0
 net_change       = st.session_state.capital - st.session_state.get("initial_capital", 100_000)
 
-c1,c2,c3,c4,c5,c6,c7 = st.columns(7)
+c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
 c1.metric("💼 Capital",       f"₹{st.session_state.capital:,.0f}", f"₹{net_change:+,.0f}")
 c2.metric("📈 Realised P&L",  f"₹{total_closed_pnl:,.0f}")
 c3.metric("📅 Daily P&L",     f"₹{st.session_state.daily_pnl:+,.0f}")
@@ -1103,7 +1271,7 @@ c7.metric("🕒 Last Scan",     st.session_state.last_scan_time or "—")
 # ================================
 # TABS
 # ================================
-tab1,tab2,tab3,tab4,tab5,tab6,tab7,tab8 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
     "🔍 Scan Results",
     "📊 Active Trades",
     "📜 Closed Trades",
@@ -1118,13 +1286,13 @@ tab1,tab2,tab3,tab4,tab5,tab6,tab7,tab8 = st.tabs([
 with tab1:
     if st.session_state.scan_results:
         df_scan = pd.DataFrame(st.session_state.scan_results)
-        f1,f2,f3,f4 = st.columns(4)
+        f1, f2, f3, f4 = st.columns(4)
         with f1:
-            sig_filter = st.selectbox("Filter Signal", ["All","BUY","SELL","Active","No Signal","Error"])
+            sig_filter = st.selectbox("Filter Signal", ["All", "BUY", "SELL", "Active", "No Signal", "Error"])
         with f2:
-            sort_col = st.selectbox("Sort by", ["Symbol","Signal","Score","Price","Vol Ratio","ATR","RSI"])
+            sort_col = st.selectbox("Sort by", ["Symbol", "Signal", "Score", "Price", "Vol Ratio", "ATR", "RSI"])
         with f3:
-            sort_asc = st.radio("Order", ["↑ Asc","↓ Desc"], horizontal=True) == "↑ Asc"
+            sort_asc = st.radio("Order", ["↑ Asc", "↓ Desc"], horizontal=True) == "↑ Asc"
         with f4:
             min_score = st.slider("Min Score", 0.0, 5.0, 0.0, 0.5)
 
@@ -1148,21 +1316,21 @@ with tab2:
         rows = []
         for sym, t in st.session_state.active_trades.items():
             entry = t["entry"]
-            rr = abs(t["target"] - entry) / abs(entry - t["sl"]) if abs(entry - t["sl"]) > 0 else 0
+            rr    = abs(t["target"] - entry) / abs(entry - t["sl"]) if abs(entry - t["sl"]) > 0 else 0
             rows.append({
                 "Symbol":       sym,
                 "Type":         t["type"],
                 "Entry":        entry,
                 "SL":           t["sl"],
                 "Target":       t["target"],
-                "Partial Tgt":  t.get("target_partial","—"),
+                "Partial Tgt":  t.get("target_partial", "—"),
                 "Qty":          t.get("qty_remaining", t["qty"]),
-                "Score":        t.get("score","—"),
+                "Score":        t.get("score", "—"),
                 "R:R":          f"1:{rr:.1f}",
                 "Partial Done": "✅" if t.get("partial_done") else "⏳",
                 "BE SL":        "✅" if t.get("breakeven_sl") else "—",
-                "Gap":          t.get("gap_flag","—") or "—",
-                "Entry Time":   t.get("entry_time","—"),
+                "Gap":          t.get("gap_flag", "—") or "—",
+                "Entry Time":   t.get("entry_time", "—"),
             })
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
@@ -1180,36 +1348,30 @@ with tab3:
     if st.session_state.closed_trades:
         closed_df = pd.DataFrame(st.session_state.closed_trades)
         total_pnl = closed_df["PnL (₹)"].sum()
-        ca,cb,cc  = st.columns(3)
-        ca.metric("Total P&L", f"₹{total_pnl:,.2f}")
+        ca, cb, cc = st.columns(3)
+        ca.metric("Total P&L",    f"₹{total_pnl:,.2f}")
         cb.metric("Total Trades", len(closed_df))
-        cc.metric("Win Rate", f"{win_rate:.1f}%")
+        cc.metric("Win Rate",     f"{win_rate:.1f}%")
 
-        # Show trades with notes inline
         st.dataframe(closed_df, use_container_width=True, hide_index=True)
 
         st.markdown("##### 📓 Add Trade Note")
         note_idx = st.selectbox("Select trade (row #)", list(range(len(st.session_state.closed_trades))))
-        note_txt = st.text_area("Note", value=st.session_state.closed_trades[note_idx].get("Note",""), height=80)
+        note_txt = st.text_area("Note", value=st.session_state.closed_trades[note_idx].get("Note", ""), height=80)
         if st.button("💾 Save Note"):
             st.session_state.closed_trades[note_idx]["Note"] = note_txt
             st.success("Note saved!")
             st.rerun()
 
-        # Export
-        export_df = pd.DataFrame(st.session_state.closed_trades)
-        csv = export_df.to_csv(index=False)
+        csv = pd.DataFrame(st.session_state.closed_trades).to_csv(index=False)
         st.download_button(
-            "⬇️ Export to CSV",
-            csv,
+            "⬇️ Export to CSV", csv,
             file_name=f"orb_trades_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
             mime="text/csv",
         )
-        # JSON journal export
-        journal_json = json.dumps(st.session_state.closed_trades, indent=2)
         st.download_button(
             "📓 Export Journal (JSON)",
-            journal_json,
+            json.dumps(st.session_state.closed_trades, indent=2),
             file_name=f"orb_journal_{datetime.now().strftime('%Y%m%d_%H%M')}.json",
             mime="application/json",
         )
@@ -1233,7 +1395,7 @@ with tab4:
         fig.add_hline(y=initial, line_dash="dash", line_color="#94a3b8",
                       annotation_text=f"Initial ₹{initial:,.0f}", annotation_position="bottom right")
         fig.update_layout(title="Equity Curve", xaxis_title="Time", yaxis_title="Capital (₹)",
-                          template="plotly_white", height=400, margin=dict(l=10,r=10,t=40,b=10))
+                          template="plotly_white", height=400, margin=dict(l=10, r=10, t=40, b=10))
         st.plotly_chart(fig, use_container_width=True)
 
         peak = equity_df["capital"].cummax()
@@ -1241,10 +1403,11 @@ with tab4:
         fig2 = go.Figure()
         fig2.add_trace(go.Scatter(
             x=equity_df["time"], y=dd, mode="lines", fill="tozeroy",
-            line=dict(color="#ef4444", width=1.5), fillcolor="rgba(239,68,68,0.1)", name="Drawdown %"
+            line=dict(color="#ef4444", width=1.5),
+            fillcolor="rgba(239,68,68,0.1)", name="Drawdown %"
         ))
         fig2.update_layout(title="Drawdown %", xaxis_title="Time", yaxis_title="Drawdown (%)",
-                            template="plotly_white", height=220, margin=dict(l=10,r=10,t=40,b=10))
+                            template="plotly_white", height=220, margin=dict(l=10, r=10, t=40, b=10))
         st.plotly_chart(fig2, use_container_width=True)
     else:
         st.info("No equity data yet.")
@@ -1252,15 +1415,15 @@ with tab4:
 # ── TAB 5: PERFORMANCE STATS ──
 with tab5:
     if st.session_state.closed_trades:
-        df_p = pd.DataFrame(st.session_state.closed_trades)
+        df_p  = pd.DataFrame(st.session_state.closed_trades)
         wins  = df_p[df_p["PnL (₹)"] > 0]
         loses = df_p[df_p["PnL (₹)"] <= 0]
 
         avg_win  = wins["PnL (₹)"].mean()  if len(wins)  > 0 else 0
         avg_loss = loses["PnL (₹)"].mean() if len(loses) > 0 else 0
-        pf       = abs(wins["PnL (₹)"].sum() / loses["PnL (₹)"].sum()) if loses["PnL (₹)"].sum() != 0 else float("inf")
+        pf       = abs(wins["PnL (₹)"].sum() / loses["PnL (₹)"].sum()) \
+                   if loses["PnL (₹)"].sum() != 0 else float("inf")
 
-        # Consecutive wins / losses
         pnl_series = df_p["PnL (₹)"].tolist()
         max_consec_wins = max_consec_loss = cur_w = cur_l = 0
         for p in pnl_series:
@@ -1271,13 +1434,12 @@ with tab5:
                 cur_l += 1; cur_w = 0
                 max_consec_loss = max(max_consec_loss, cur_l)
 
-        # Best / worst hour
         df_p["Hour"] = pd.to_datetime(df_p["Entry Time"], format="%H:%M:%S", errors="coerce").dt.hour
         hour_pnl = df_p.groupby("Hour")["PnL (₹)"].sum()
         best_hr  = int(hour_pnl.idxmax()) if not hour_pnl.empty else "—"
         worst_hr = int(hour_pnl.idxmin()) if not hour_pnl.empty else "—"
 
-        s1,s2,s3 = st.columns(3)
+        s1, s2, s3 = st.columns(3)
         with s1:
             st.markdown(f'<div class="backtest-stat"><div class="val" style="color:#16a34a;">₹{avg_win:,.0f}</div><div class="lbl">Avg Win</div></div>', unsafe_allow_html=True)
         with s2:
@@ -1286,7 +1448,7 @@ with tab5:
             st.markdown(f'<div class="backtest-stat"><div class="val">{pf:.2f}x</div><div class="lbl">Profit Factor</div></div>', unsafe_allow_html=True)
 
         st.markdown("<br>", unsafe_allow_html=True)
-        s4,s5,s6,s7 = st.columns(4)
+        s4, s5, s6, s7 = st.columns(4)
         with s4:
             st.markdown(f'<div class="backtest-stat"><div class="val">{max_consec_wins}</div><div class="lbl">Max Consec. Wins</div></div>', unsafe_allow_html=True)
         with s5:
@@ -1297,31 +1459,29 @@ with tab5:
             st.markdown(f'<div class="backtest-stat"><div class="val">{worst_hr}:00</div><div class="lbl">Worst Hour</div></div>', unsafe_allow_html=True)
 
         st.markdown("<br>", unsafe_allow_html=True)
-        # Hourly P&L bar chart
         if not hour_pnl.empty:
             fig_h = px.bar(
                 x=[f"{h}:00" for h in hour_pnl.index],
                 y=hour_pnl.values,
                 color=hour_pnl.values,
-                color_continuous_scale=["#ef4444","#fbbf24","#22c55e"],
-                labels={"x":"Hour","y":"P&L (₹)"},
+                color_continuous_scale=["#ef4444", "#fbbf24", "#22c55e"],
+                labels={"x": "Hour", "y": "P&L (₹)"},
                 title="P&L by Hour of Day"
             )
             fig_h.update_layout(template="plotly_white", height=300, showlegend=False,
-                                 coloraxis_showscale=False, margin=dict(l=10,r=10,t=40,b=10))
+                                 coloraxis_showscale=False, margin=dict(l=10, r=10, t=40, b=10))
             st.plotly_chart(fig_h, use_container_width=True)
 
-        # Score vs P&L scatter
         df_p2 = df_p[pd.to_numeric(df_p["Score"], errors="coerce").notna()].copy()
         df_p2["Score"] = pd.to_numeric(df_p2["Score"])
         if not df_p2.empty:
             fig_s = px.scatter(
                 df_p2, x="Score", y="PnL (₹)", color="Type",
-                color_discrete_map={"BUY":"#22c55e","SELL":"#ef4444"},
+                color_discrete_map={"BUY": "#22c55e", "SELL": "#ef4444"},
                 title="Signal Score vs P&L",
-                hover_data=["Symbol","Entry","Exit"]
+                hover_data=["Symbol", "Entry", "Exit"]
             )
-            fig_s.update_layout(template="plotly_white", height=300, margin=dict(l=10,r=10,t=40,b=10))
+            fig_s.update_layout(template="plotly_white", height=300, margin=dict(l=10, r=10, t=40, b=10))
             st.plotly_chart(fig_s, use_container_width=True)
     else:
         st.info("No closed trades yet to analyse.")
@@ -1332,11 +1492,11 @@ with tab6:
     if st.session_state.scan_results:
         sector_counts = {}
         for row in st.session_state.scan_results:
-            sym = row["Symbol"].replace("—","")
+            sym    = row["Symbol"].replace("⚠️ ", "").replace("—", "")
             sector = SECTOR_MAP.get(sym, "Other")
-            sig    = str(row.get("Signal",""))
+            sig    = str(row.get("Signal", ""))
             if sector not in sector_counts:
-                sector_counts[sector] = {"BUY":0,"SELL":0,"Active":0,"No Signal":0}
+                sector_counts[sector] = {"BUY": 0, "SELL": 0, "Active": 0, "No Signal": 0}
             if "BUY" in sig and "Active" not in sig and "Skipped" not in sig:
                 sector_counts[sector]["BUY"] += 1
             elif "SELL" in sig and "Active" not in sig and "Skipped" not in sig:
@@ -1350,31 +1510,30 @@ with tab6:
         for sector, counts in sector_counts.items():
             total_sig = counts["BUY"] + counts["SELL"]
             heat_rows.append({
-                "Sector":    sector,
-                "BUY":       counts["BUY"],
-                "SELL":      counts["SELL"],
-                "Active":    counts["Active"],
-                "No Signal": counts["No Signal"],
+                "Sector":        sector,
+                "BUY":           counts["BUY"],
+                "SELL":          counts["SELL"],
+                "Active":        counts["Active"],
+                "No Signal":     counts["No Signal"],
                 "Total Signals": total_sig,
             })
         heat_df = pd.DataFrame(heat_rows).sort_values("Total Signals", ascending=False)
 
-        # Treemap
-        if not heat_df.empty:
+        sig_heat = heat_df[heat_df["Total Signals"] > 0]
+        if not sig_heat.empty:
             fig_tree = px.treemap(
-                heat_df[heat_df["Total Signals"] > 0].assign(parent="Sectors"),
-                path=["parent","Sector"],
+                sig_heat.assign(parent="Sectors"),
+                path=["parent", "Sector"],
                 values="Total Signals",
                 color="BUY",
-                color_continuous_scale=["#fca5a5","#bbf7d0"],
+                color_continuous_scale=["#fca5a5", "#bbf7d0"],
                 title="Signal Distribution by Sector (size = total signals, color = BUY count)"
             )
-            fig_tree.update_layout(height=420, margin=dict(l=10,r=10,t=50,b=10))
+            fig_tree.update_layout(height=420, margin=dict(l=10, r=10, t=50, b=10))
             st.plotly_chart(fig_tree, use_container_width=True)
 
         st.dataframe(heat_df, use_container_width=True, hide_index=True)
 
-        # Concentration warning
         top_sector = heat_df.iloc[0] if not heat_df.empty else None
         if top_sector is not None and top_sector["Total Signals"] > 3:
             st.warning(f"⚠️ Over-concentration: **{top_sector['Sector']}** sector has {top_sector['Total Signals']} signals. Consider diversifying.")
@@ -1399,81 +1558,76 @@ with tab7:
         bt_atr_tgt = st.number_input("BT ATR Target Multiplier", 1.0, 5.0, 2.0, 0.5, key="bt_atr")
 
     if st.button("▶️ Run Backtest", type="primary"):
-        with st.spinner("Running backtest on 5-day data..."):
+        with st.spinner("Running backtest on 5-day data…"):
             bt_trades = []
             for sym in bt_symbols:
                 _, df_bt, err = fetch(sym, "5m", "5d")
-                if err or df_bt is None or len(df_bt) < 30:
+                if err or df_bt is None or len(df_bt) < 10:
                     continue
                 df_bt = add_indicators(df_bt)
-                df_bt = df_bt.copy()
                 df_bt.index = pd.to_datetime(df_bt.index)
 
-                # Group by date
                 for day, grp in df_bt.groupby(df_bt.index.date):
                     grp = grp.copy()
                     grp["_time"] = grp.index.time
                     cutoff_t = (
-                        pd.Timestamp.combine(pd.Timestamp(day), dtime(9, 15))
-                        + pd.Timedelta(minutes=int(bt_orb_min))
+                        datetime.combine(day, dtime(9, 15))
+                        + timedelta(minutes=int(bt_orb_min))
                     ).time()
-                    orb_part = grp[grp["_time"] <= cutoff_t]
-                    rest_part= grp[grp["_time"] > cutoff_t]
+                    orb_part  = grp[grp["_time"] <= cutoff_t]
+                    rest_part = grp[grp["_time"] > cutoff_t]
                     if len(orb_part) < 2 or len(rest_part) < 2:
                         continue
 
                     orb_h = float(orb_part["High"].max())
                     orb_l = float(orb_part["Low"].min())
 
-                    in_trade  = False
-                    direction = None
-                    entry_p   = sl_p = tgt_p = 0.0
-                    entry_idx = None
+                    in_trade = False
+                    direction = entry_p = sl_p = tgt_p = 0.0
 
-                    for i, (idx, row) in enumerate(rest_part.iterrows()):
+                    for idx, row in rest_part.iterrows():
                         close = float(row["Close"])
                         atr   = float(row["ATR"]) if not pd.isna(row["ATR"]) else 0
 
                         if not in_trade:
                             if close > orb_h:
-                                direction = "BUY"
-                                entry_p   = close
-                                sl_p      = orb_l
-                                tgt_p     = entry_p + bt_atr_tgt * atr
-                                in_trade  = True
-                                entry_idx = str(idx)
+                                direction = "BUY"; entry_p = close
+                                sl_p = orb_l; tgt_p = entry_p + bt_atr_tgt * atr
+                                in_trade = True
                             elif close < orb_l:
-                                direction = "SELL"
-                                entry_p   = close
-                                sl_p      = orb_h
-                                tgt_p     = entry_p - bt_atr_tgt * atr
-                                in_trade  = True
-                                entry_idx = str(idx)
+                                direction = "SELL"; entry_p = close
+                                sl_p = orb_h; tgt_p = entry_p - bt_atr_tgt * atr
+                                in_trade = True
                         else:
                             if direction == "BUY":
                                 if close <= sl_p:
-                                    pnl = close - entry_p
-                                    bt_trades.append({"Date":str(day),"Symbol":sym,"Dir":"BUY","Entry":round(entry_p,2),"Exit":round(close,2),"PnL":round(pnl,2),"Reason":"SL"})
+                                    bt_trades.append({"Date": str(day), "Symbol": sym, "Dir": "BUY",
+                                                       "Entry": round(entry_p, 2), "Exit": round(close, 2),
+                                                       "PnL": round(close - entry_p, 2), "Reason": "SL"})
                                     in_trade = False
                                 elif close >= tgt_p:
-                                    pnl = close - entry_p
-                                    bt_trades.append({"Date":str(day),"Symbol":sym,"Dir":"BUY","Entry":round(entry_p,2),"Exit":round(close,2),"PnL":round(pnl,2),"Reason":"TGT"})
+                                    bt_trades.append({"Date": str(day), "Symbol": sym, "Dir": "BUY",
+                                                       "Entry": round(entry_p, 2), "Exit": round(close, 2),
+                                                       "PnL": round(close - entry_p, 2), "Reason": "TGT"})
                                     in_trade = False
                             else:
                                 if close >= sl_p:
-                                    pnl = entry_p - close
-                                    bt_trades.append({"Date":str(day),"Symbol":sym,"Dir":"SELL","Entry":round(entry_p,2),"Exit":round(close,2),"PnL":round(pnl,2),"Reason":"SL"})
+                                    bt_trades.append({"Date": str(day), "Symbol": sym, "Dir": "SELL",
+                                                       "Entry": round(entry_p, 2), "Exit": round(close, 2),
+                                                       "PnL": round(entry_p - close, 2), "Reason": "SL"})
                                     in_trade = False
                                 elif close <= tgt_p:
-                                    pnl = entry_p - close
-                                    bt_trades.append({"Date":str(day),"Symbol":sym,"Dir":"SELL","Entry":round(entry_p,2),"Exit":round(close,2),"PnL":round(pnl,2),"Reason":"TGT"})
+                                    bt_trades.append({"Date": str(day), "Symbol": sym, "Dir": "SELL",
+                                                       "Entry": round(entry_p, 2), "Exit": round(close, 2),
+                                                       "PnL": round(entry_p - close, 2), "Reason": "TGT"})
                                     in_trade = False
 
-                    # EOD close
                     if in_trade:
                         close = float(rest_part["Close"].iloc[-1])
                         pnl   = (close - entry_p) if direction == "BUY" else (entry_p - close)
-                        bt_trades.append({"Date":str(day),"Symbol":sym,"Dir":direction,"Entry":round(entry_p,2),"Exit":round(close,2),"PnL":round(pnl,2),"Reason":"EOD"})
+                        bt_trades.append({"Date": str(day), "Symbol": sym, "Dir": direction,
+                                           "Entry": round(entry_p, 2), "Exit": round(close, 2),
+                                           "PnL": round(pnl, 2), "Reason": "EOD"})
 
             st.session_state.backtest_results = bt_trades
 
@@ -1481,12 +1635,14 @@ with tab7:
             bt_df  = pd.DataFrame(st.session_state.backtest_results)
             bt_wins= bt_df[bt_df["PnL"] > 0]
             bt_loss= bt_df[bt_df["PnL"] <= 0]
-            bt_wr  = len(bt_wins)/len(bt_df)*100 if len(bt_df) > 0 else 0
-            bt_pf  = abs(bt_wins["PnL"].sum()/bt_loss["PnL"].sum()) if bt_loss["PnL"].sum() != 0 else float("inf")
+            bt_wr  = len(bt_wins) / len(bt_df) * 100 if len(bt_df) > 0 else 0
+            bt_pf  = abs(bt_wins["PnL"].sum() / bt_loss["PnL"].sum()) \
+                     if bt_loss["PnL"].sum() != 0 else float("inf")
 
-            b1,b2,b3,b4,b5 = st.columns(5)
+            b1, b2, b3, b4, b5 = st.columns(5)
+            pnl_color = "#16a34a" if bt_df["PnL"].sum() > 0 else "#dc2626"
             with b1: st.markdown(f'<div class="backtest-stat"><div class="val">{len(bt_df)}</div><div class="lbl">Total Trades</div></div>', unsafe_allow_html=True)
-            with b2: st.markdown(f'<div class="backtest-stat"><div class="val" style="color:{"#16a34a" if bt_df["PnL"].sum()>0 else "#dc2626"}">₹{bt_df["PnL"].sum():,.0f}</div><div class="lbl">Total P&L (pts)</div></div>', unsafe_allow_html=True)
+            with b2: st.markdown(f'<div class="backtest-stat"><div class="val" style="color:{pnl_color}">₹{bt_df["PnL"].sum():,.0f}</div><div class="lbl">Total P&L (pts)</div></div>', unsafe_allow_html=True)
             with b3: st.markdown(f'<div class="backtest-stat"><div class="val">{bt_wr:.1f}%</div><div class="lbl">Win Rate</div></div>', unsafe_allow_html=True)
             with b4: st.markdown(f'<div class="backtest-stat"><div class="val">{bt_pf:.2f}x</div><div class="lbl">Profit Factor</div></div>', unsafe_allow_html=True)
             with b5: st.markdown(f'<div class="backtest-stat"><div class="val">{len(bt_wins)}/{len(bt_loss)}</div><div class="lbl">W/L</div></div>', unsafe_allow_html=True)
@@ -1501,27 +1657,37 @@ with tab7:
                 fillcolor="rgba(99,102,241,0.1)", name="Cumulative P&L"
             ))
             fig_bt.add_hline(y=0, line_dash="dash", line_color="#94a3b8")
-            fig_bt.update_layout(title="Backtest Cumulative P&L (price points per share)",
-                                  template="plotly_white", height=350,
-                                  margin=dict(l=10,r=10,t=40,b=10))
+            fig_bt.update_layout(
+                title="Backtest Cumulative P&L (price points per share)",
+                template="plotly_white", height=350,
+                margin=dict(l=10, r=10, t=40, b=10)
+            )
             st.plotly_chart(fig_bt, use_container_width=True)
             st.dataframe(bt_df, use_container_width=True, hide_index=True)
 
-            csv_bt = bt_df.to_csv(index=False)
-            st.download_button("⬇️ Download Backtest CSV", csv_bt,
-                                file_name=f"orb_backtest_{datetime.now().strftime('%Y%m%d')}.csv",
-                                mime="text/csv")
+            st.download_button(
+                "⬇️ Download Backtest CSV",
+                bt_df.to_csv(index=False),
+                file_name=f"orb_backtest_{datetime.now().strftime('%Y%m%d')}.csv",
+                mime="text/csv",
+            )
         else:
             st.warning("No backtest trades generated. Try more symbols or adjust ORB minutes.")
 
     elif st.session_state.backtest_results:
-        bt_df = pd.DataFrame(st.session_state.backtest_results)
-        st.dataframe(bt_df, use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(st.session_state.backtest_results), use_container_width=True, hide_index=True)
 
 # ── TAB 8: ERROR LOG ──
 with tab8:
     if st.session_state.error_log:
         st.dataframe(pd.DataFrame(st.session_state.error_log), use_container_width=True, hide_index=True)
         st.caption(f"{len(st.session_state.error_log)} symbol(s) had fetch issues")
+        st.info(
+            "**Common causes of fetch errors:**\n"
+            "- Market closed / weekend (5m data may be unavailable — scanner uses 5d period as fallback)\n"
+            "- Symbol delisted or incorrect ticker suffix (.NS vs .BO)\n"
+            "- Yahoo Finance rate limiting (try again in 30–60 seconds)\n"
+            "- Network / proxy issues"
+        )
     else:
         st.success("✅ No errors in last scan.")
